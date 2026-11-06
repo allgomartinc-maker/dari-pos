@@ -13,7 +13,8 @@ import { receiptDoc, zReportDoc, labelDoc, printHtml, printBluetooth, connectBlu
 import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep } from './scanner.js';
 import { $, $$, esc, toast, modal, confirmBox, formBox, keypadHtml, bindPinPad, askPin, download, pickFile } from './ui.js';
 
-const m = (p) => formatMoney(p);
+// On screen the word «افغانی» is drawn small after the number; plain text (toasts, confirms, receipts) uses formatMoney.
+const m = (p) => `${formatNumber(p)} <small class="cur">افغانی</small>`;
 const now = () => new Date().toISOString();
 const state = { user: null, s: null, view: 'register', cart: [], tendered: '', batch: null, item: null };
 
@@ -310,12 +311,12 @@ function drawPay() {
   const { items, total } = cartTotals(state.cart);
   const tendered = parseMoney(state.tendered);
   const ch = changeDue(total, tendered);
-  $('#totalDue').textContent = m(total);
+  $('#totalDue').innerHTML = m(total);
   $('#itemCount').textContent = `${toDariDigits(items)} قلم`;
   const box = $('#changeBox');
   box.classList.toggle('short', !ch.ok && tendered > 0);
   box.firstElementChild.textContent = !ch.ok && tendered > 0 ? 'کمبود پول' : 'باقی پول مشتری';
-  $('#changeDue').textContent = m(tendered === 0 ? 0 : ch.ok ? ch.change : ch.short);
+  $('#changeDue').innerHTML = m(tendered === 0 ? 0 : ch.ok ? ch.change : ch.short);
   $('#completeBtn').disabled = !state.cart.length || !ch.ok || tendered === 0;
 }
 
@@ -415,7 +416,7 @@ async function showReceipt(receiptId) {
       box.querySelector('[data-void]')?.addEventListener('click', async () => {
         const admin = await requireAdmin('باطل کردن رسید به رمز مدیر نیاز دارد');
         if (!admin) return;
-        if (!(await confirmBox(`رسید ${sale.receiptId} به مبلغ ${m(sale.total)} باطل شود؟ اجناس به گدام برمی‌گردد.`, { danger: true, okText: 'باطل شود' }))) return;
+        if (!(await confirmBox(`رسید ${sale.receiptId} به مبلغ ${formatMoney(sale.total)} باطل شود؟ اجناس به گدام برمی‌گردد.`, { danger: true, okText: 'باطل شود' }))) return;
         await voidSale(sale, admin);
         close();
         toast('رسید باطل شد', 'ok');
@@ -502,18 +503,18 @@ async function addMovement(shift, type, label) {
 function blindClose(shift) {
   modal(`<h2>شمارش پول ختم شفت</h2>
     <p class="muted">همه پول‌ها و سکه‌های داخل دخل را بشمارید — پول آغاز شفت را هم حساب کنید.</p>
-    <div class="denoms">${AFN_DENOMS.map((d) => `<label>${toDariDigits(d)} ؋ ×<input data-den="${d}" inputmode="numeric" placeholder="۰"></label>`).join('')}</div>
+    <div class="denoms">${AFN_DENOMS.map((d) => `<label><span>${toDariDigits(d)} <small class="cur">افغانی</small> ×</span><input data-den="${d}" inputmode="numeric" placeholder="۰"></label>`).join('')}</div>
     <p>مجموع شمارش شده:</p><div class="counted num" id="counted">${m(0)}</div>
     <div class="actions"><button class="btn danger grow" data-submit>قفل و ثبت شمارش</button><button class="btn" data-no>لغو</button></div>`, {
     dismiss: false,
     onMount: (box, close) => {
       const read = () => Object.fromEntries($$('[data-den]', box).map((i) => [i.dataset.den, parseIntSafe(i.value)]));
-      box.addEventListener('input', () => { $('#counted', box).textContent = m(countDenoms(read())); });
+      box.addEventListener('input', () => { $('#counted', box).innerHTML = m(countDenoms(read())); });
       box.querySelector('[data-no]').onclick = close;
       box.querySelector('[data-submit]').onclick = async () => {
         const denoms = read();
         const counted = countDenoms(denoms);
-        if (!(await confirmBox(`مجموع شمارش ${m(counted)} ثبت شود؟ بعد از ثبت قابل تغییر نیست.`))) return;
+        if (!(await confirmBox(`مجموع شمارش ${formatMoney(counted)} ثبت شود؟ بعد از ثبت قابل تغییر نیست.`))) return;
         close();
         const result = await finalizeShift(shift, denoms, counted);
         beep('done');
@@ -607,7 +608,7 @@ async function renderReceive() {
   $('#camBtn').onclick = (e) => toggleCamera('camBox', receiveCode, e.currentTarget);
   $('#noCode').onclick = async () => receiveCode(internalBarcode(await nextSeq('internalSeq')));
   $('#endBatch').onclick = async () => {
-    if (!(await confirmBox(`محموله «${b.supplier}» با ${toDariDigits(lines.length)} قلم و مجموع ${m(totalCost)} ختم شود؟`))) return;
+    if (!(await confirmBox(`محموله «${b.supplier}» با ${toDariDigits(lines.length)} قلم و مجموع ${formatMoney(totalCost)} ختم شود؟`))) return;
     state.batch = null;
     await setSetting('currentBatch', null);
     toast('محموله ثبت شد', 'ok');
@@ -974,7 +975,7 @@ function askWeight(p, current) {
       dismiss: false,
       onMount: (box, close) => {
         const f = box.querySelector('#wf');
-        const show = () => { box.querySelector('#wTotal').textContent = m(lineTotal({ price: p.price, qty: parseQty(f.w.value), unit: 'kg' })); };
+        const show = () => { box.querySelector('#wTotal').innerHTML = m(lineTotal({ price: p.price, qty: parseQty(f.w.value), unit: 'kg' })); };
         f.w.oninput = () => { f.amt.value = ''; show(); };
         f.amt.oninput = () => { const w = weightForAmount(parseMoney(f.amt.value), p.price); f.w.value = w ? qtyInput(w) : ''; show(); };
         box.querySelector('.qty-add').onclick = (e) => { const k = e.target.closest('[data-kg]')?.dataset.kg; if (k) { f.w.value = qtyInput(+k); f.amt.value = ''; show(); f.w.focus(); } };

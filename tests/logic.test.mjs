@@ -22,11 +22,11 @@ test('parseMoney returns integer pul (x100), accepts Dari digits and separators'
   assert.equal(parseMoney('-5'), 0);
 });
 
-test('formatMoney uses Dari digits and ؋, hides .00', () => {
-  assert.equal(formatMoney(125000), '۱٬۲۵۰ ؋');
-  assert.equal(formatMoney(1250), '۱۲٫۵۰ ؋');
-  assert.equal(formatMoney(0), '۰ ؋');
-  assert.equal(formatMoney(-800), '-۸ ؋');
+test('formatMoney uses Dari digits and the word افغانی, hides .00', () => {
+  assert.equal(formatMoney(125000), '۱٬۲۵۰ افغانی');
+  assert.equal(formatMoney(1250), '۱۲٫۵۰ افغانی');
+  assert.equal(formatMoney(0), '۰ افغانی');
+  assert.equal(formatMoney(-800), '-۸ افغانی');
   assert.equal(formatMoney(125000, { latin: true }), '1,250 AFN');
 });
 

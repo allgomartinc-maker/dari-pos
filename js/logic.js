@@ -45,7 +45,7 @@ export function formatNumber(pul, { latin = false } = {}) {
 }
 
 export function formatMoney(pul, opts = {}) {
-  return formatNumber(pul, opts) + (opts.latin ? ' AFN' : ' ؋');
+  return formatNumber(pul, opts) + (opts.latin ? ' AFN' : ' افغانی');
 }
 
 // ---------- quantities: pieces (integer) or kg (decimal, 3 places = grams) ----------

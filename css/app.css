@@ -202,3 +202,7 @@ tr.voided td { text-decoration: line-through; color: var(--muted); }
 
 /* sold by weight */
 .weight-btn { border: 1px solid var(--border); background: var(--surface); border-radius: 10px; padding: 6px 10px; font-weight: 700; cursor: pointer; min-height: 40px; white-space: nowrap; }
+
+/* currency word drawn small after amounts */
+.cur { font-size: .6em; font-weight: 600; opacity: .85; margin-inline-start: .15em; }
+.small .cur, .muted .cur, .price-btn .cur, td .cur, .line-total .cur { font-size: .82em; }
