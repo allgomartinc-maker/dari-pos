@@ -1,9 +1,9 @@
 // Service worker: caches the whole app so it opens and runs with no internet.
-const VERSION = 'dari-pos-v6';
+const VERSION = 'dari-pos-v7';
 const ASSETS = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/db.js', 'js/logic.js', 'js/print.js', 'js/scanner.js', 'js/sync.js', 'js/ui.js',
-  'vendor/dexie.min.js', 'vendor/html5-qrcode.min.js', 'vendor/qrcode.js', 'vendor/fonts/Vazirmatn.woff2',
+  'vendor/dexie.min.js', 'vendor/html5-qrcode.min.js', 'vendor/qrcode.js', 'vendor/zxing/zxing-reader.js', 'vendor/zxing/zxing_reader.wasm', 'vendor/fonts/Vazirmatn.woff2',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png'
 ];
 

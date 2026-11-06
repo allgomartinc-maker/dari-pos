@@ -10,7 +10,7 @@ import {
 } from './db.js';
 import { syncNow, startAutoSync, onSyncChange, pullUsers, pullProducts } from './sync.js';
 import { receiptDoc, zReportDoc, labelDoc, printHtml, printBluetooth, connectBluetooth, bluetoothSupported, bluetoothName } from './print.js';
-import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep } from './scanner.js';
+import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep, warmUpScanner, decoderName } from './scanner.js';
 import { $, $$, esc, toast, modal, confirmBox, formBox, keypadHtml, bindPinPad, askPin, download, pickFile } from './ui.js';
 
 // On screen the word «افغانی» is drawn small after the number; plain text (toasts, confirms, receipts) uses formatMoney.
@@ -56,6 +56,12 @@ async function boot() {
   startAutoSync();
   idleLock();
   if (!state.s.setupDone) renderSetup(); else renderLock();
+}
+
+// Installed version = the service-worker cache name (sw.js VERSION), so shops can tell us what they run.
+async function appVersion() {
+  try { const k = (await caches.keys()).find((x) => x.startsWith('dari-pos-v')); return k ? k.replace('dari-pos-', '') : ''; }
+  catch { return ''; }
 }
 
 function idleLock() {
@@ -136,7 +142,9 @@ function renderLock() {
     <h2>${esc(state.s.storeName)}</h2><p class="muted">رمز خود را وارد کنید</p>
     <div class="pin-dots"></div>${keypadHtml()}
     <button class="btn primary block" data-k="E" style="margin-top:8px">ورود</button>
+    <div class="muted small app-ver" id="appVer"></div>
   </div></div>`;
+  appVersion().then((v) => { const el = $('#appVer'); if (el && v) el.textContent = `نسخه ${v}`; });
   bindPinPad($('.lock'), async (pin) => {
     if (Date.now() < lockedUntil) return toast('چند بار رمز اشتباه شد. ۳۰ ثانیه صبر کنید.', 'err');
     const u = await findUserByPin(pin);
@@ -243,6 +251,7 @@ async function renderRegister() {
   const input = $('#scanInput');
   bindScanInput(input, registerCode, { onType: searchProducts });
   $('#camBtn').onclick = (e) => toggleCamera('camBox', registerCode, e.currentTarget);
+  warmUpScanner();
   $('#tendered').value = state.tendered;
   $('#tendered').oninput = (e) => { state.tendered = e.target.value; drawPay(); };
   $('#tendered').onkeydown = (e) => { if (e.key === 'Enter') completeSale(); };
@@ -909,6 +918,7 @@ async function renderSettings() {
   const persisted = navigator.storage?.persisted ? await navigator.storage.persisted() : false;
   $('#main').innerHTML = `<div class="stack">
     <form class="card stack" id="sf"><h2>⚙️ تنظیمات فروشگاه</h2>
+      <div class="muted small">نسخه برنامه: <b class="ltr">${esc(await appVersion() || '—')}</b> · اسکنر: <b class="ltr">${esc(decoderName || '—')}</b></div>
       <div class="grid2">
         <label class="field">نام فروشگاه<input name="storeName" value="${esc(s.storeName)}"></label>
         <label class="field">آدرس<input name="storeAddress" value="${esc(s.storeAddress)}"></label>

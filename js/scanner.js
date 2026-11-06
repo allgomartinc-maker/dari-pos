@@ -40,16 +40,21 @@ export function initWedge() {
 }
 
 // ---------- camera ----------
-// One pipeline for every phone: our own HD video + a crop of the centre strip at full resolution.
-//  - Fast path: the phone's built-in BarcodeDetector (Android Chrome etc.).
-//  - Fallback (e.g. iPhone): the ZXing decoder bundled in html5-qrcode, fed the full-resolution crop.
-// (html5-qrcode's own live loop shrinks the frame to the on-screen box, ~350px on a phone, which
-//  squeezes each bar to ~1px — that is why scanning used to need many seconds or a very close phone.)
-let cam = null;  // { stream, video, stopped, timer }
+// One pipeline for every phone: our own HD video, the centre strip read at full resolution.
+// Decoder, best available first:
+//  1. the phone's built-in BarcodeDetector (most Android phones with Chrome)
+//  2. zxing-wasm (ZXing C++ compiled to WebAssembly; iPhone, Huawei, Firefox, desktops) — fast and robust
+//  3. the JavaScript ZXing inside html5-qrcode (only if WebAssembly is unavailable)
+// html5-qrcode's own live loop is not used: it shrank frames to the on-screen box (~350px on a phone),
+// squeezing each bar to ~1px, which is why scanning used to be slow.
+let cam = null;  // { stream, track, video, stopped, timer }
 let lastCode = '', lastAt = 0;
+export let decoderName = '';
 const NATIVE_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf', 'qr_code'];
+const WASM_FORMATS = ['EAN13', 'EAN8', 'UPCA', 'UPCE', 'Code128', 'Code39', 'ITF', 'QRCode'];
 const VIDEO = { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 }, advanced: [{ focusMode: 'continuous' }] };
-const CROP_W = 0.9, CROP_H = 0.5, MAX_W = 1280; // centre strip at full HD resolution: small/far barcodes need ~2px per bar
+const CROP_W = 0.9, CROP_H = 0.5; // centre strip (matches the white guide box) at full HD: far barcodes need ~2px per bar
+const ZOOM = 2; // 2x zoom: hold the phone ~25 cm away, where phone cameras can focus sharply
 
 function emit(text, onCode) {
   const code = normalizeBarcode(text);
@@ -58,66 +63,191 @@ function emit(text, onCode) {
   const repeat = code === lastCode && now - lastAt < 1500;
   lastCode = code; lastAt = now;
   if (repeat || document.querySelector('.modal-back')) return;
+  if (navigator.vibrate) navigator.vibrate(40);
   onCode(code, 'camera');
 }
 
-async function makeDecoder() {
-  if ('BarcodeDetector' in window && !window.__noNativeScan) {
-    try {
-      const supported = await window.BarcodeDetector.getSupportedFormats();
-      const formats = NATIVE_FORMATS.filter((f) => supported.includes(f));
-      if (formats.includes('ean_13')) {
-        const det = new window.BarcodeDetector({ formats });
-        return async (video) => { const r = await det.detect(video); return r[0]?.rawValue || null; };
-      }
-    } catch { /* fall through to ZXing */ }
+// Draws the centre strip of the current frame into a canvas at full resolution.
+function cropper() {
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  return (video) => {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const sw = Math.round(vw * CROP_W), sh = Math.round(vh * CROP_H);
+    if (canvas.width !== sw || canvas.height !== sh) { canvas.width = sw; canvas.height = sh; }
+    ctx.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, sw, sh);
+    return { canvas, ctx };
+  };
+}
+
+async function nativeDecoder() {
+  if (!('BarcodeDetector' in window) || window.__scanDecoder && window.__scanDecoder !== 'native') return null;
+  try {
+    const supported = await window.BarcodeDetector.getSupportedFormats();
+    const formats = NATIVE_FORMATS.filter((f) => supported.includes(f));
+    if (!formats.includes('ean_13')) return null;
+    const det = new window.BarcodeDetector({ formats });
+    const crop = cropper();
+    return async (video) => { const r = await det.detect(crop(video).canvas); return r[0]?.rawValue || null; };
+  } catch { return null; }
+}
+
+let wasmReady = null;
+function loadWasm() {
+  if (!wasmReady) {
+    const Z = window.ZXingWASM;
+    if (!Z || typeof WebAssembly !== 'object') return Promise.reject(new Error('no wasm'));
+    const base = new URL('vendor/zxing/', document.baseURI).href; // served locally and cached for offline use
+    wasmReady = Z.prepareZXingModule({
+      overrides: { locateFile: (path, prefix) => (path.endsWith('.wasm') ? base + path : prefix + path) },
+      fireImmediately: true
+    }).then(() => Z).catch((e) => { wasmReady = null; throw e; });
   }
+  return wasmReady;
+}
+// Start downloading/compiling the decoder early so the first scan is not delayed.
+export function warmUpScanner() { if (!('BarcodeDetector' in window)) loadWasm().catch(() => {}); }
+
+async function wasmDecoder() {
+  if (window.__scanDecoder && window.__scanDecoder !== 'wasm') return null;
+  try {
+    const Z = await loadWasm();
+    const crop = cropper();
+    const opts = { formats: WASM_FORMATS, maxNumberOfSymbols: 1, tryHarder: true, tryRotate: false, tryInvert: false, tryDownscale: true };
+    let frame = 0;
+    // Alternate frames: raw (best for sharp / far barcodes) and cleaned (best for dim shops and grainy cameras).
+    return async (video) => {
+      const { canvas, ctx } = crop(video);
+      const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      if (frame++ % 2) cleanFrame(img);
+      const r = await Z.readBarcodes(img, opts);
+      return r.find((x) => x.isValid)?.text || null;
+    };
+  } catch { return null; }
+}
+
+// In place: grey, 3x3 smoothing (removes sensor noise), then stretch contrast so dim bars become black/white.
+// Plain JS because canvas filters are missing on older iPhones.
+export function cleanFrame(img) {
+  const { data, width: w, height: h } = img;
+  const n = w * h, g = new Float32Array(n), t = new Float32Array(n);
+  for (let i = 0; i < n; i++) g[i] = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2];
+  for (let y = 0; y < h; y++) {
+    const r = y * w;
+    for (let x = 0; x < w; x++) t[r + x] = (g[r + Math.max(0, x - 1)] + g[r + x] + g[r + Math.min(w - 1, x + 1)]) / 3;
+  }
+  const hist = new Uint32Array(256);
+  for (let y = 0; y < h; y++) {
+    const up = Math.max(0, y - 1) * w, dn = Math.min(h - 1, y + 1) * w, r = y * w;
+    for (let x = 0; x < w; x++) { const v = (t[up + x] + t[r + x] + t[dn + x]) / 3; g[r + x] = v; hist[v | 0]++; }
+  }
+  let lo = 0, hi = 255, acc = 0;
+  for (; lo < 255; lo++) { acc += hist[lo]; if (acc > n * 0.02) break; }
+  for (acc = 0; hi > 0; hi--) { acc += hist[hi]; if (acc > n * 0.02) break; }
+  const k = hi > lo ? 255 / (hi - lo) : 1;
+  for (let i = 0; i < n; i++) { const v = (g[i] - lo) * k; data[i * 4] = data[i * 4 + 1] = data[i * 4 + 2] = v; data[i * 4 + 3] = 255; }
+  return img;
+}
+
+function jsDecoder() {
   const F = window.Html5QrcodeSupportedFormats;
+  document.getElementById('zxingHolder')?.remove();
   const holder = document.createElement('div');
   holder.id = 'zxingHolder'; holder.hidden = true;
-  document.getElementById('zxingHolder')?.remove();
   document.body.appendChild(holder);
   const zx = new window.Html5Qrcode('zxingHolder', {
     verbose: false,
     formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.ITF, F.QR_CODE],
     experimentalFeatures: { useBarCodeDetectorIfSupported: false }
   });
-  const shim = zx.qrcode;
-  if (!shim || typeof shim.decodeAsync !== 'function') throw new Error('ZXing decoder not available');
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-  return async (video) => {
-    const vw = video.videoWidth, vh = video.videoHeight;
-    const sw = Math.round(vw * CROP_W), sh = Math.round(vh * CROP_H);
-    const scale = Math.min(1, MAX_W / sw);
-    canvas.width = Math.round(sw * scale); canvas.height = Math.round(sh * scale);
-    ctx.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, canvas.width, canvas.height);
-    try { return (await shim.decodeAsync(canvas)).text; } catch { return null; } // throws when nothing found
-  };
+  const crop = cropper();
+  return async (video) => { try { return (await zx.qrcode.decodeAsync(crop(video).canvas)).text; } catch { return null; } };
+}
+
+async function makeDecoder() {
+  let d = await nativeDecoder();
+  if (d) {
+    decoderName = 'native';
+    // Safety net: some phones report a built-in reader that never finds anything (e.g. Android without
+    // Google services). Every third frame the built-in reader misses also goes through zxing-wasm.
+    let backup = null, i = 0;
+    if (!window.__scanDecoder) wasmDecoder().then((w) => { backup = w; });
+    const native = d;
+    return async (video) => (await native(video)) || (backup && ++i % 3 === 0 ? backup(video) : null);
+  }
+  d = await wasmDecoder();
+  if (d) { decoderName = 'wasm'; return d; }
+  decoderName = 'js';
+  return jsDecoder();
+}
+
+// Zoom, flashlight and tap-to-focus, where the phone allows them.
+async function setupControls(box, track, signal) {
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  const bar = document.createElement('div');
+  bar.className = 'cam-controls';
+  if (caps.zoom && caps.zoom.max >= 1.5) {
+    const z = Math.min(ZOOM, caps.zoom.max);
+    try { await track.applyConstraints({ advanced: [{ zoom: z }] }); } catch { /* ignore */ }
+    let zoomed = true;
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'cam-btn'; b.textContent = `${z}×`;
+    b.onclick = async (e) => {
+      e.stopPropagation(); zoomed = !zoomed;
+      try { await track.applyConstraints({ advanced: [{ zoom: zoomed ? z : caps.zoom.min || 1 }] }); } catch { /* ignore */ }
+      b.textContent = zoomed ? `${z}×` : '1×';
+    };
+    bar.appendChild(b);
+  }
+  if (caps.torch) {
+    let on = false;
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'cam-btn'; b.textContent = '🔦';
+    b.onclick = async (e) => {
+      e.stopPropagation(); on = !on;
+      try { await track.applyConstraints({ advanced: [{ torch: on }] }); b.classList.toggle('on', on); } catch { on = !on; }
+    };
+    bar.appendChild(b);
+  }
+  if (bar.children.length) box.appendChild(bar);
+  // Tap the picture to refocus (phones that support single-shot focus).
+  const modes = caps.focusMode || [];
+  if (modes.includes('single-shot') || modes.includes('continuous')) {
+    box.addEventListener('click', async (e) => {
+      if (e.target.closest('.cam-btn')) return;
+      box.classList.add('focusing');
+      try {
+        if (modes.includes('single-shot')) await track.applyConstraints({ advanced: [{ focusMode: 'single-shot' }] });
+        if (modes.includes('continuous')) setTimeout(() => track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(() => {}), 800);
+      } catch { /* ignore */ }
+      setTimeout(() => box.classList.remove('focusing'), 600);
+    }, { signal });
+  }
 }
 
 export async function startCamera(elementId, onCode) {
   await stopCamera();
-  const decode = await makeDecoder();
   const box = document.getElementById(elementId);
-  const stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO, audio: false });
+  const [decode, stream] = await Promise.all([makeDecoder(), navigator.mediaDevices.getUserMedia({ video: VIDEO, audio: false })]);
+  const track = stream.getVideoTracks()[0];
   const video = document.createElement('video');
   video.setAttribute('playsinline', '');
   video.muted = true;
   video.srcObject = stream;
   box.innerHTML = '<div class="scan-guide"></div>';
   box.prepend(video);
-  const c = cam = { stream, video, stopped: false, timer: 0 };
+  const c = cam = { stream, track, video, box, stopped: false, timer: 0, ac: new AbortController() };
   await video.play();
-  // Each decode finishes before the next one starts, and the pause after it is as long as the decode took,
-  // so on a slow phone the scanner uses at most about half the CPU and buttons stay responsive.
+  setupControls(box, track, c.ac.signal).catch(() => {});
+  // Each decode finishes before the next starts; the pause after it is as long as the decode took,
+  // so a slow phone spends at most about half its time scanning and buttons stay responsive.
   const tick = async () => {
     if (c.stopped) return;
     const t0 = performance.now();
     if (video.readyState >= 2 && video.videoWidth) {
       try { const text = await decode(video); if (text && !c.stopped) emit(text, onCode); } catch { /* frame not ready */ }
     }
-    if (!c.stopped) c.timer = setTimeout(tick, Math.max(20, Math.min(400, performance.now() - t0)));
+    if (!c.stopped) c.timer = setTimeout(tick, Math.max(15, Math.min(300, performance.now() - t0)));
   };
   tick();
 }
@@ -128,7 +258,9 @@ export async function stopCamera() {
   c.stopped = true;
   clearTimeout(c.timer);
   c.stream.getTracks().forEach((t) => t.stop());
-  if (c.video.parentElement) c.video.parentElement.innerHTML = '';
+  c.ac.abort(); // removes the tap-to-focus listener
+  c.box.classList.remove('focusing');
+  c.box.innerHTML = '';
 }
 
 export function cameraActive() { return !!cam; }
