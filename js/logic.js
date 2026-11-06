@@ -154,6 +154,12 @@ export function normalizeBarcode(s) {
   return toLatinDigits(s).trim();
 }
 
+// True for what a scanner produces (printable ASCII, no spaces, 3+ chars); false for typed names like «پیاز».
+export function looksLikeBarcode(s) {
+  const v = normalizeBarcode(String(s || ''));
+  return v.length >= 3 && /^[\x21-\x7E]+$/.test(v);
+}
+
 // Validates EAN-8 / UPC-A / EAN-13 / GTIN-14 check digits. Non-numeric codes pass.
 export function eanValid(code) {
   if (!/^\d+$/.test(code) || ![8, 12, 13, 14].includes(code.length)) return true;

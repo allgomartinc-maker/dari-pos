@@ -1,7 +1,7 @@
 // Dari POS — app controller. Views: lock, setup, register, receive, products, shift, reports, settings.
 import {
   formatMoney, formatNumber, parseMoney, parseIntSafe, toDariDigits, cartTotals, changeDue, marginPct, QUICK_CASH,
-  AFN_DENOMS, countDenoms, shiftExpected, varianceStatus, makeReceiptId, parseReceiptQr, eanValid, normalizeBarcode,
+  AFN_DENOMS, countDenoms, shiftExpected, varianceStatus, makeReceiptId, parseReceiptQr, eanValid, normalizeBarcode, looksLikeBarcode,
   randomId, internalBarcode, toCsv, parseCsv, dariDate, parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount, round3
 } from './logic.js';
 import {
@@ -18,13 +18,14 @@ const m = (p) => `${formatNumber(p)} <small class="cur">افغانی</small>`;
 const now = () => new Date().toISOString();
 const state = { user: null, s: null, view: 'register', cart: [], tendered: '', batch: null, item: null };
 
+// [id, icon + label, role, short label for the phone tab bar]
 const VIEWS = [
-  ['register', '🛒 فروش', 'cashier'],
-  ['shift', '💵 شفت', 'cashier'],
-  ['receive', '📦 دریافت جنس', 'admin'],
-  ['products', '🏷️ اجناس', 'admin'],
-  ['reports', '📊 گزارش‌ها', 'admin'],
-  ['settings', '⚙️ تنظیمات', 'admin']
+  ['register', '🛒 فروش', 'cashier', 'فروش'],
+  ['shift', '💵 شفت', 'cashier', 'شفت'],
+  ['receive', '📦 دریافت جنس', 'admin', 'دریافت'],
+  ['products', '🏷️ اجناس', 'admin', 'اجناس'],
+  ['reports', '📊 گزارش‌ها', 'admin', 'گزارش'],
+  ['settings', '⚙️ تنظیمات', 'admin', 'تنظیمات']
 ];
 const isAdmin = () => state.user?.role === 'admin';
 
@@ -70,11 +71,17 @@ async function refreshBadge() {
   const n = await pendingCount();
   const s = await getSettings();
   state.s = s;
-  if (!s.webhookUrl) { b.className = 'badge offline'; b.textContent = `⚪ فقط دستگاه (${toDariDigits(n)} ریکارد محلی)`; b.title = 'گوگل شیت در تنظیمات وصل نشده'; }
-  else if (!navigator.onLine) { b.className = 'badge offline'; b.textContent = `🟠 آفلاین (${toDariDigits(n)} در انتظار)`; }
-  else if (s.lastSyncError && n) { b.className = 'badge error'; b.textContent = `🔴 خطا (${toDariDigits(n)} در انتظار)`; b.title = s.lastSyncError; }
-  else if (n) { b.className = 'badge offline'; b.textContent = `🟡 آنلاین (${toDariDigits(n)} در انتظار)`; }
-  else { b.className = 'badge online'; b.textContent = s.webhookUrl ? '🟢 آنلاین (همگام)' : '🟢 آنلاین'; }
+  // Label + detail in separate spans so phones can show just the short label.
+  const set = (cls, dot, label, detail, title = '') => {
+    b.className = 'badge ' + cls; b.title = title || `${label} ${detail}`;
+    b.innerHTML = `${dot} <span class="bl">${esc(label)}</span>${detail ? ` <span class="bd">${esc(detail)}</span>` : ''}`;
+  };
+  const cnt = toDariDigits(n);
+  if (!s.webhookUrl) set('offline', '⚪', 'فقط دستگاه', `(${cnt} ریکارد محلی)`, 'گوگل شیت در تنظیمات وصل نشده');
+  else if (!navigator.onLine) set('offline', '🟠', 'آفلاین', `(${cnt} در انتظار)`);
+  else if (s.lastSyncError && n) set('error', '🔴', 'خطا', `(${cnt} در انتظار)`, s.lastSyncError);
+  else if (n) set('offline', '🟡', 'آنلاین', `(${cnt} در انتظار)`);
+  else set('online', '🟢', 'آنلاین', '(همگام)');
 }
 
 // ====================================================================== setup & lock
@@ -152,7 +159,10 @@ function renderShell() {
   $('#storeTitle').textContent = state.s.storeName;
   $('#userChip').textContent = `${state.user.name} · ${isAdmin() ? 'مدیر' : 'صندوقدار'}`;
   $('#nav').innerHTML = VIEWS.filter(([, , r]) => r === 'cashier' || isAdmin())
-    .map(([id, label]) => `<button data-view="${id}">${label}</button>`).join('');
+    .map(([id, label, , short]) => {
+      const [icon, ...rest] = label.split(' ');
+      return `<button data-view="${id}"><span class="ni">${icon}</span><span class="nl">${rest.join(' ')}</span><span class="ns">${short}</span></button>`;
+    }).join('');
   $('#nav').onclick = (e) => { const v = e.target.closest('[data-view]')?.dataset.view; if (v) go(v); };
   refreshBadge();
 }
@@ -167,7 +177,7 @@ async function go(view) {
 }
 
 function onScan(code) {
-  if (!state.user) return;
+  if (!state.user || document.querySelector('.modal-back')) return;
   if (state.view === 'register') return registerCode(code);
   if (state.view === 'receive') return receiveCode(code);
   if (state.view === 'products') { const i = $('#prodSearch'); if (i) { i.value = code; i.dispatchEvent(new Event('input')); } return; }
@@ -215,6 +225,7 @@ async function renderRegister() {
       <div id="quickGrid" class="quick-grid"></div>
       <div id="cart" class="cart"></div>
     </div>
+    <button type="button" id="payJump" class="pay-jump hidden"><span id="payJumpCount"></span><span class="pj-total num" id="payJumpTotal"></span><span class="pj-go">پرداخت ⬅</span></button>
     <div class="pay stack">
       <div class="total-due"><div class="k">مجموع قابل پرداخت</div><div class="v num" id="totalDue"></div><div class="small" id="itemCount"></div></div>
       <div class="card stack">
@@ -248,8 +259,17 @@ async function renderRegister() {
   $('#clearTender').onclick = () => { state.tendered = ''; $('#tendered').value = ''; drawPay(); };
   $('#clearCart').onclick = async () => { if (state.cart.length && await confirmBox('سبد خرید خالی شود؟')) { state.cart = []; state.tendered = ''; renderRegister(); } };
   $('#completeBtn').onclick = completeSale;
+  $('#payJump').onclick = () => { $('.pay').scrollIntoView({ behavior: 'smooth', block: 'start' }); setTimeout(() => $('#tendered')?.focus({ preventScroll: true }), 350); };
+  // Hide the floating pay bar while the pay panel itself is on screen.
+  if ('IntersectionObserver' in window) {
+    const io = new IntersectionObserver(([en]) => { state.payVisible = en.isIntersecting; drawPay(); }, { threshold: 0.15 });
+    io.observe($('.pay'));
+  }
   $('#cart').onclick = cartClick;
-  $('#results').onclick = (e) => { const b = e.target.closest('[data-bc]')?.dataset.bc; if (b) { registerCode(b); input.value = ''; $('#results').innerHTML = ''; input.focus(); } };
+  $('#results').onclick = (e) => {
+    const n = e.target.closest('[data-addname]')?.dataset.addname;
+    if (n) { input.value = ''; $('#results').innerHTML = ''; return addNewProduct({ name: n }); }
+    const b = e.target.closest('[data-bc]')?.dataset.bc; if (b) { registerCode(b); input.value = ''; $('#results').innerHTML = ''; input.focus(); } };
   $('#quickGrid').onclick = (e) => { const b = e.target.closest('[data-bc]')?.dataset.bc; if (b) registerCode(b); };
   const quick = await db.products.where('quick').equals(1).toArray();
   $('#quickGrid').innerHTML = quick.map((p) => `<button class="btn" data-bc="${esc(p.barcode)}"><span>${p.unit === 'kg' ? '⚖ ' : ''}${esc(p.name)}</span><span class="small muted">${priceLabel(p)}</span></button>`).join('');
@@ -262,20 +282,18 @@ async function searchProducts(q) {
   if (!q || /^\d+$/.test(normalizeBarcode(q))) { box.innerHTML = ''; return; }
   const list = await db.products.filter((p) => p.name.includes(q)).limit(8).toArray();
   box.innerHTML = list.map((p) => `<button class="btn" data-bc="${esc(p.barcode)}"><span>${p.unit === 'kg' ? '⚖ ' : ''}${esc(p.name)}</span><span>${priceLabel(p)}</span></button>`).join('')
-    || '<div class="muted small">چیزی پیدا نشد</div>';
+    || `<button class="btn nf-add" data-addname="${esc(q)}">➕ «${esc(q)}» پیدا نشد — اضافه کردن جنس</button>`;
 }
 
 async function registerCode(code) {
   const r = parseReceiptQr(code);
   if (r) return showReceipt(r.receiptId);
+  if (!looksLikeBarcode(code)) return registerByName(code);
   const p = await db.products.get(code);
   if (!p) {
     beep('err');
     if (!eanValid(code)) return toast('بارکد درست خوانده نشد، دوباره اسکن کنید', 'err');
-    if (isAdmin()) {
-      if (await confirmBox(`جنس با بارکد ${code} ثبت نیست. اکنون ثبت شود؟`, { okText: 'ثبت جنس' })) editProduct({ barcode: code }, () => registerCode(code));
-    } else toast('این جنس ثبت نیست — به مدیر بگویید', 'err');
-    return;
+    return notFound({ barcode: code });
   }
   beep('ok');
   if (p.unit === 'kg') {
@@ -291,6 +309,35 @@ async function registerCode(code) {
   else state.cart.unshift({ barcode: p.barcode, name: p.name, price: p.price, cost: p.cost || 0, qty: 1 });
   if ((p.stock || 0) <= 0) toast(`موجودی «${p.name}» در سیستم صفر است`);
   drawCart();
+}
+
+// Enter pressed on a typed name: one match → add it; several → show the list; none → offer to add.
+async function registerByName(q) {
+  const name = q.trim();
+  const list = await db.products.filter((p) => p.name.includes(name)).limit(8).toArray();
+  if (list.length === 1) return registerCode(list[0].barcode);
+  if (list.length > 1) { const i = $('#scanInput'); if (i) i.value = name; searchProducts(name); return toast('یکی از اجناس را انتخاب کنید'); }
+  beep('err');
+  notFound({ name });
+}
+
+// Big, clear "not found" box with an add button (cashiers need the manager PIN to add).
+function notFound({ barcode = '', name = '' }) {
+  modal(`<div class="nf"><div class="nf-icon">🔍</div><h2>جنس پیدا نشد</h2>
+    <p class="muted">این جنس هنوز در سیستم ثبت نیست:</p>
+    <div class="nf-what">${barcode ? `<span class="ltr">${esc(barcode)}</span>` : `«${esc(name)}»`}</div>
+    <div class="actions"><button class="btn primary big grow" data-add>➕ اضافه کردن جنس</button><button class="btn big" data-no>بستن</button></div></div>`, {
+    dismiss: false,
+    onMount: (box, close) => {
+      box.querySelector('[data-no]').onclick = () => { close(); $('#scanInput')?.focus(); };
+      box.querySelector('[data-add]').onclick = () => { close(); addNewProduct({ barcode, name }); };
+    }
+  });
+}
+
+async function addNewProduct({ barcode = '', name = '' }) {
+  if (!(await requireAdmin('برای اضافه کردن جنس جدید، رمز مدیر را وارد کنید'))) return;
+  editProduct({ barcode, name }, (bc) => { if (state.view === 'register' && bc) registerCode(bc); }, { isNew: true });
 }
 
 function drawCart() {
@@ -318,6 +365,12 @@ function drawPay() {
   box.firstElementChild.textContent = !ch.ok && tendered > 0 ? 'کمبود پول' : 'باقی پول مشتری';
   $('#changeDue').innerHTML = m(tendered === 0 ? 0 : ch.ok ? ch.change : ch.short);
   $('#completeBtn').disabled = !state.cart.length || !ch.ok || tendered === 0;
+  const pj = $('#payJump');
+  if (pj) {
+    pj.classList.toggle('hidden', !state.cart.length || !!state.payVisible);
+    $('#payJumpCount').textContent = `${toDariDigits(items)} قلم`;
+    $('#payJumpTotal').innerHTML = m(total);
+  }
 }
 
 async function cartClick(e) {
@@ -746,8 +799,7 @@ async function renderProducts() {
   draw();
 }
 
-function editProduct(p, after) {
-  const isNew = !p.name;
+function editProduct(p, after, { isNew = !p.name } = {}) {
   modal(`<h2>${isNew ? 'جنس جدید' : 'ویرایش جنس'}</h2><form class="stack" id="pf">
     <label class="field">بارکد<div class="row"><input name="barcode" class="grow ltr" required value="${esc(p.barcode || '')}" ${isNew ? '' : 'readonly'}>
       ${isNew ? '<button type="button" class="btn small" id="genCode">تولید کد داخلی</button>' : ''}</div></label>
@@ -772,6 +824,8 @@ function editProduct(p, after) {
       updUnit();
       box.querySelector('[data-no]').onclick = close;
       box.querySelector('#genCode')?.addEventListener('click', async () => { f.barcode.value = internalBarcode(await nextSeq('internalSeq')); });
+      if (isNew && p.name && !f.barcode.value) nextSeq('internalSeq').then((n) => { if (!f.barcode.value) f.barcode.value = internalBarcode(n); });
+      if (isNew && p.name) setTimeout(() => f.price.focus(), 50);
       box.querySelector('[data-label]')?.addEventListener('click', () => printHtml(labelDoc(p), state.s.paperWidth));
       box.querySelector('[data-del]')?.addEventListener('click', async () => {
         if (!(await confirmBox(`«${p.name}» از لیست اجناس حذف شود؟ (فروش‌های قبلی باقی می‌ماند)`, { danger: true, okText: 'حذف' }))) return;
@@ -785,7 +839,7 @@ function editProduct(p, after) {
         const unit = f.unit.value === 'kg' ? 'kg' : 'pc';
         await db.products.put({ barcode: bc, name: f.name.value.trim(), price: parseMoney(f.price.value), cost: parseMoney(f.cost.value), unit,
           stock: unit === 'kg' ? parseQty(f.stock.value) : parseIntSafe(f.stock.value), quick: f.quick.checked ? 1 : 0, updatedAt: now(), synced: 0 });
-        close(); toast('ذخیره شد', 'ok'); refreshBadge(); after?.();
+        close(); toast('ذخیره شد', 'ok'); refreshBadge(); after?.(bc);
       };
     }
   });

@@ -55,8 +55,10 @@ export async function startCamera(elementId, onCode) {
     (text) => {
       const code = normalizeBarcode(text);
       const now = Date.now();
-      if (code === lastCode && now - lastAt < 1500) return; // debounce repeated reads
+      // Same code still in view counts once; any dialog open (not-found, weight, add product) pauses the camera.
+      const repeat = code === lastCode && now - lastAt < 1500;
       lastCode = code; lastAt = now;
+      if (repeat || document.querySelector('.modal-back')) return;
       onCode(code, 'camera');
     }, () => {});
 }

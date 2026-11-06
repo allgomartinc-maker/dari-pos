@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {
   toLatinDigits, toDariDigits, parseMoney, formatMoney, cartTotals, changeDue,
   marginPct, countDenoms, AFN_DENOMS, shiftExpected, varianceStatus, hashPin,
-  makeReceiptId, receiptQr, parseReceiptQr, eanValid, normalizeBarcode,
+  makeReceiptId, receiptQr, parseReceiptQr, eanValid, normalizeBarcode, looksLikeBarcode,
   packRaster, csvEscape, toCsv, parseCsv, applySaleToStock
 } from '../js/logic.js';
 
@@ -197,4 +197,14 @@ test('weighed line totals round to whole afghani, so "50 AFN of onions" charges 
   assert.equal(lineTotal({ price: 3500, qty: w, unit: 'kg' }), 5000);
   assert.equal(lineTotal({ price: 6000, qty: 0.333, unit: 'kg' }), 2000);
   assert.equal(lineTotal({ price: 6000, qty: 1.25, unit: 'kg' }), 7500);
+});
+
+test('looksLikeBarcode: scanner output vs typed product names', () => {
+  assert.equal(looksLikeBarcode('4006381333931'), true);
+  assert.equal(looksLikeBarcode('۴۰۰۶۳۸۱۳۳۳۹۳۱'), true); // Dari digits typed on a Dari keyboard
+  assert.equal(looksLikeBarcode('AB-1234'), true);
+  assert.equal(looksLikeBarcode('پیاز'), false);
+  assert.equal(looksLikeBarcode('red apple'), false);
+  assert.equal(looksLikeBarcode('12'), false);
+  assert.equal(looksLikeBarcode(''), false);
 });
