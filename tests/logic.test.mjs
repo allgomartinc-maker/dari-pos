@@ -131,3 +131,70 @@ test('internalBarcode makes valid in-store EAN-13 (prefix 2) from a sequence', a
   assert.equal(eanValid(c), true);
   assert.notEqual(internalBarcode(18), c);
 });
+
+// ---------- sold by weight (kg) ----------
+import { parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount } from '../js/logic.js';
+
+test('parseQty reads decimal kg in Dari or Latin digits, max 3 decimals', () => {
+  assert.equal(parseQty('1.25'), 1.25);
+  assert.equal(parseQty('۱٫۲۵'), 1.25);
+  assert.equal(parseQty('0,5'), 0.5);
+  assert.equal(parseQty('۰٫۳۳۳۳'), 0.333);
+  assert.equal(parseQty('3'), 3);
+  assert.equal(parseQty(''), 0);
+  assert.equal(parseQty('abc'), 0);
+  assert.equal(parseQty('-2'), 0);
+});
+
+test('formatQty shows kg with Dari decimal and unit, pieces as plain numbers', () => {
+  assert.equal(formatQty(1.25, 'kg'), '۱٫۲۵ کیلو');
+  assert.equal(formatQty(2, 'kg'), '۲ کیلو');
+  assert.equal(formatQty(0.5, 'kg'), '۰٫۵ کیلو');
+  assert.equal(formatQty(3), '۳');
+  assert.equal(formatQty(3, 'pc'), '۳');
+});
+
+test('lineTotal rounds weight × price-per-kg to whole pul', () => {
+  assert.equal(lineTotal({ price: 6000, qty: 1.25 }), 7500);
+  assert.equal(lineTotal({ price: 6000, qty: 0.333 }), 1998);
+  assert.equal(lineTotal({ price: 1999, qty: 0.7 }), 1399);
+  assert.equal(lineTotal({ price: 4000, qty: 3 }), 12000);
+});
+
+test('cartTotals counts a weighed line as one item and rounds money', () => {
+  const r = cartTotals([{ price: 6000, qty: 1.25, unit: 'kg' }, { price: 4000, qty: 2 }]);
+  assert.deepEqual(r, { items: 3, total: 15500 });
+  assert.equal(cartTotals([{ price: 1999, qty: 0.7, unit: 'kg' }]).total, 1400);
+});
+
+test('stock math on kg does not drift', () => {
+  assert.equal(addQty(10, -0.1 * 3), 9.7);
+  assert.equal(addQty(0.1, 0.2), 0.3);
+  const products = new Map([['200000000001X', { stock: 10 }]]);
+  applySaleToStock(products, [{ barcode: '200000000001X', qty: 0.7 }, { barcode: '200000000001X', qty: 0.1 }], -1);
+  assert.equal(products.get('200000000001X').stock, 9.2);
+});
+
+test('normalizeUnit accepts kg in English or Dari, defaults to piece', () => {
+  assert.equal(normalizeUnit('kg'), 'kg');
+  assert.equal(normalizeUnit('KG'), 'kg');
+  assert.equal(normalizeUnit('کیلو'), 'kg');
+  assert.equal(normalizeUnit('کیلوگرام'), 'kg');
+  assert.equal(normalizeUnit(''), 'pc');
+  assert.equal(normalizeUnit(undefined), 'pc');
+  assert.equal(normalizeUnit('دانه'), 'pc');
+});
+
+test('weightForAmount: "give me 50 AFN of tomatoes" at 60 AFN/kg', () => {
+  assert.equal(weightForAmount(5000, 6000), 0.833);
+  assert.equal(weightForAmount(6000, 6000), 1);
+  assert.equal(weightForAmount(5000, 0), 0);
+});
+
+test('weighed line totals round to whole afghani, so "50 AFN of onions" charges exactly 50', () => {
+  const w = weightForAmount(5000, 3500);
+  assert.equal(w, 1.428);
+  assert.equal(lineTotal({ price: 3500, qty: w, unit: 'kg' }), 5000);
+  assert.equal(lineTotal({ price: 6000, qty: 0.333, unit: 'kg' }), 2000);
+  assert.equal(lineTotal({ price: 6000, qty: 1.25, unit: 'kg' }), 7500);
+});

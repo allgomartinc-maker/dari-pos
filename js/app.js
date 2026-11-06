@@ -2,7 +2,7 @@
 import {
   formatMoney, formatNumber, parseMoney, parseIntSafe, toDariDigits, cartTotals, changeDue, marginPct, QUICK_CASH,
   AFN_DENOMS, countDenoms, shiftExpected, varianceStatus, makeReceiptId, parseReceiptQr, eanValid, normalizeBarcode,
-  randomId, internalBarcode, toCsv, parseCsv, dariDate
+  randomId, internalBarcode, toCsv, parseCsv, dariDate, parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount, round3
 } from './logic.js';
 import {
   db, getSettings, setSetting, nextSeq, createUser, setUserPin, findUserByPin, pinInUse, openShift, pendingCount,
@@ -111,10 +111,11 @@ const toLatin = (s) => String(s ?? '').replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵�
 
 async function addSampleProducts() {
   const items = [['نان', 1000, 700, 1], ['شیر ۱ لیتر', 6000, 4800, 1], ['تخم مرغ (دانه)', 1000, 800, 1], ['برنج ۱ کیلو', 9000, 7500, 0],
-    ['روغن ۵ لیتر', 65000, 56000, 0], ['چای سبز ۲۵۰ گرم', 12000, 9000, 0], ['بوره ۱ کیلو', 7000, 6000, 0], ['آب معدنی', 2000, 1200, 1]];
-  for (const [name, price, cost, quick] of items) {
+    ['روغن ۵ لیتر', 65000, 56000, 0], ['چای سبز ۲۵۰ گرم', 12000, 9000, 0], ['بوره ۱ کیلو', 7000, 6000, 0], ['آب معدنی', 2000, 1200, 1],
+    ['بادنجان رومی (کیلو)', 6000, 4500, 1, 'kg'], ['کچالو (کیلو)', 4000, 3000, 1, 'kg'], ['پیاز (کیلو)', 3500, 2500, 1, 'kg']];
+  for (const [name, price, cost, quick, unit = 'pc'] of items) {
     const seq = await nextSeq('internalSeq');
-    await db.products.put({ barcode: internalBarcode(seq), name, price, cost, stock: 50, quick, updatedAt: now(), synced: 0 });
+    await db.products.put({ barcode: internalBarcode(seq), name, price, cost, stock: 50, quick, unit, updatedAt: now(), synced: 0 });
   }
 }
 
@@ -250,7 +251,7 @@ async function renderRegister() {
   $('#results').onclick = (e) => { const b = e.target.closest('[data-bc]')?.dataset.bc; if (b) { registerCode(b); input.value = ''; $('#results').innerHTML = ''; input.focus(); } };
   $('#quickGrid').onclick = (e) => { const b = e.target.closest('[data-bc]')?.dataset.bc; if (b) registerCode(b); };
   const quick = await db.products.where('quick').equals(1).toArray();
-  $('#quickGrid').innerHTML = quick.map((p) => `<button class="btn" data-bc="${esc(p.barcode)}"><span>${esc(p.name)}</span><span class="small muted">${m(p.price)}</span></button>`).join('');
+  $('#quickGrid').innerHTML = quick.map((p) => `<button class="btn" data-bc="${esc(p.barcode)}"><span>${p.unit === 'kg' ? '⚖ ' : ''}${esc(p.name)}</span><span class="small muted">${priceLabel(p)}</span></button>`).join('');
   drawCart();
 }
 
@@ -259,7 +260,7 @@ async function searchProducts(q) {
   if (!box) return;
   if (!q || /^\d+$/.test(normalizeBarcode(q))) { box.innerHTML = ''; return; }
   const list = await db.products.filter((p) => p.name.includes(q)).limit(8).toArray();
-  box.innerHTML = list.map((p) => `<button class="btn" data-bc="${esc(p.barcode)}"><span>${esc(p.name)}</span><span>${m(p.price)}</span></button>`).join('')
+  box.innerHTML = list.map((p) => `<button class="btn" data-bc="${esc(p.barcode)}"><span>${p.unit === 'kg' ? '⚖ ' : ''}${esc(p.name)}</span><span>${priceLabel(p)}</span></button>`).join('')
     || '<div class="muted small">چیزی پیدا نشد</div>';
 }
 
@@ -276,6 +277,14 @@ async function registerCode(code) {
     return;
   }
   beep('ok');
+  if (p.unit === 'kg') {
+    const w = await askWeight(p);
+    if (!w) return;
+    state.cart.unshift({ barcode: p.barcode, name: p.name, price: p.price, cost: p.cost || 0, qty: w, unit: 'kg' });
+    if ((p.stock || 0) <= 0) toast(`موجودی «${p.name}» در سیستم صفر است`);
+    drawCart();
+    return;
+  }
   const line = state.cart.find((l) => l.barcode === p.barcode && !l.override);
   if (line) line.qty++;
   else state.cart.unshift({ barcode: p.barcode, name: p.name, price: p.price, cost: p.cost || 0, qty: 1 });
@@ -287,9 +296,11 @@ function drawCart() {
   const c = $('#cart');
   if (!c) return;
   c.innerHTML = state.cart.length ? state.cart.map((l, i) => `<div class="cart-line">
-      <div><div class="name">${esc(l.name)}</div><button class="price-btn" data-price="${i}">${m(l.price)}${l.override ? ' ✎' : ''}</button></div>
-      <div class="qty"><button data-dec="${i}" aria-label="کم">−</button><span class="num">${toDariDigits(l.qty)}</span><button data-inc="${i}" aria-label="زیاد">+</button></div>
-      <div class="line-total num">${m(l.price * l.qty)}</div>
+      <div><div class="name">${esc(l.name)}</div><button class="price-btn" data-price="${i}">${priceLabel(l)}${l.override ? ' ✎' : ''}</button></div>
+      ${l.unit === 'kg'
+        ? `<div class="qty"><button class="weight-btn num" data-w="${i}" aria-label="تغییر وزن">⚖ ${formatQty(l.qty, 'kg')}</button></div>`
+        : `<div class="qty"><button data-dec="${i}" aria-label="کم">−</button><span class="num">${toDariDigits(l.qty)}</span><button data-inc="${i}" aria-label="زیاد">+</button></div>`}
+      <div class="line-total num">${m(lineTotal(l))}</div>
       <button class="btn small" data-del="${i}" aria-label="حذف">🗑</button></div>`).join('')
     : '<div class="empty">سبد خالی است — جنس را اسکن کنید</div>';
   drawPay();
@@ -315,11 +326,17 @@ async function cartClick(e) {
   if (d.inc) state.cart[+d.inc].qty++;
   else if (d.dec) { const l = state.cart[+d.dec]; if (l.qty > 1) l.qty--; else state.cart.splice(+d.dec, 1); }
   else if (d.del) state.cart.splice(+d.del, 1);
+  else if (d.w) {
+    const l = state.cart[+d.w];
+    const w = await askWeight(l, l.qty);
+    if (!w) return;
+    l.qty = w;
+  }
   else if (d.price) {
     const l = state.cart[+d.price];
     const approver = await requireAdmin('تغییر قیمت به تأیید مدیر نیاز دارد');
     if (!approver) return;
-    const v = await formBox('تغییر قیمت', [{ name: 'price', label: `قیمت جدید برای «${l.name}»`, value: formatNumber(l.price), inputmode: 'decimal' }]);
+    const v = await formBox('تغییر قیمت', [{ name: 'price', label: `قیمت جدید برای «${l.name}»${l.unit === 'kg' ? ' (فی کیلو)' : ''}`, value: formatNumber(l.price), inputmode: 'decimal' }]);
     if (!v) return;
     l.price = parseMoney(v.price);
     l.override = true;
@@ -345,7 +362,7 @@ async function completeSale() {
     await db.sales.add(sale);
     for (const l of sale.items) {
       const p = await db.products.get(l.barcode);
-      if (p) await db.products.update(l.barcode, { stock: (p.stock || 0) - l.qty, updatedAt: ts, synced: 0 });
+      if (p) await db.products.update(l.barcode, { stock: addQty(p.stock, -l.qty), updatedAt: ts, synced: 0 });
     }
   });
   beep('done');
@@ -382,7 +399,7 @@ async function showReceipt(receiptId) {
   modal(`<h2>رسید <span class="ltr">${esc(sale.receiptId)}</span></h2>
     <p class="muted">${esc(dariDate(sale.timestamp))} · ${esc(sale.cashierName)} ${sale.voided ? '· <b style="color:var(--danger)">باطل شده</b>' : ''}</p>
     <div class="table-wrap"><table><thead><tr><th>جنس</th><th>تعداد</th><th>قیمت</th><th>مجموع</th></tr></thead><tbody>
-    ${sale.items.map((l) => `<tr><td>${esc(l.name)}</td><td>${toDariDigits(l.qty)}</td><td>${m(l.price)}</td><td>${m(l.price * l.qty)}</td></tr>`).join('')}
+    ${sale.items.map((l) => `<tr><td>${esc(l.name)}</td><td>${formatQty(l.qty, l.unit)}</td><td>${priceLabel(l)}</td><td>${m(lineTotal(l))}</td></tr>`).join('')}
     </tbody></table></div>
     <p><b>مجموع: ${m(sale.total)}</b> · دریافتی: ${m(sale.cashReceived)} · باقی: ${m(sale.changeGiven)}</p>
     <div class="actions">
@@ -414,7 +431,7 @@ async function voidSale(sale, admin) {
     await db.sales.update(sale.receiptId, { voided: 1, voidedBy: admin.name, voidedAt: ts, updatedAt: ts, synced: 0 });
     for (const l of sale.items) {
       const p = await db.products.get(l.barcode);
-      if (p) await db.products.update(l.barcode, { stock: (p.stock || 0) + l.qty, updatedAt: ts, synced: 0 });
+      if (p) await db.products.update(l.barcode, { stock: addQty(p.stock, l.qty), updatedAt: ts, synced: 0 });
     }
   });
   refreshBadge();
@@ -573,7 +590,7 @@ async function renderReceive() {
     return;
   }
   const lines = await db.receivings.where('batchId').equals(b.batchId).toArray();
-  const totalCost = lines.reduce((a, l) => a + l.qty * l.cost, 0);
+  const totalCost = lines.reduce((a, l) => a + Math.round(l.qty * l.cost), 0);
   $('#main').innerHTML = `<div class="stack">
     <div class="card"><div class="row"><h2 style="margin:0">📦 ${esc(b.supplier)}</h2><span class="muted">فاکتور: ${esc(b.invoiceNo || '—')}</span>
       <span class="spacer"></span><button class="btn primary" id="endBatch">ختم محموله</button></div>
@@ -584,7 +601,7 @@ async function renderReceive() {
     <div class="card"><div class="row"><h3 style="margin:0">اجناس این محموله</h3><span class="spacer"></span>
       <b>مجموع فاکتور: ${m(totalCost)}</b></div>
       ${lines.length ? `<div class="table-wrap"><table><thead><tr><th>جنس</th><th>تعداد</th><th>قیمت خرید</th><th>قیمت فروش</th><th>مجموع</th></tr></thead><tbody>
-      ${lines.map((l) => `<tr><td>${esc(l.name)}</td><td>${toDariDigits(l.qty)}</td><td>${m(l.cost)}</td><td>${m(l.price)}</td><td>${m(l.qty * l.cost)}</td></tr>`).join('')}
+      ${lines.map((l) => `<tr><td>${esc(l.name)}</td><td>${formatQty(l.qty, l.unit)}</td><td>${m(l.cost)}</td><td>${m(l.price)}</td><td>${m(Math.round(l.qty * l.cost))}</td></tr>`).join('')}
       </tbody></table></div>` : '<p class="muted">هنوز جنسی اضافه نشده</p>'}</div></div>`;
   bindScanInput($('#recvScan'), receiveCode);
   $('#camBtn').onclick = (e) => toggleCamera('camBox', receiveCode, e.currentTarget);
@@ -608,16 +625,16 @@ async function receiveCode(code) {
   const card = $('#itemCard');
   card.classList.remove('hidden');
   card.innerHTML = `<form class="stack" id="itemForm">
-    <div class="row"><b>بارکد:</b><span class="ltr">${esc(code)}</span>${p ? `<span class="muted">موجودی فعلی: ${toDariDigits(p.stock || 0)}</span>` : '<span class="new-flag">جنس جدید! نام و قیمت را وارد کنید</span>'}</div>
+    <div class="row"><b>بارکد:</b><span class="ltr">${esc(code)}</span>${p ? `<span class="muted">موجودی فعلی: ${formatQty(p.stock || 0, p.unit)}</span>` : '<span class="new-flag">جنس جدید! نام و قیمت را وارد کنید</span>'}</div>
     <label class="field">نام جنس<input name="name" required value="${esc(p?.name || '')}" ${p ? '' : 'autofocus'}></label>
+    ${unitSelectHtml(p?.unit)}
     <div class="grid2">
-      <label class="field">قیمت خرید (فی دانه)<input name="cost" inputmode="decimal" required value="${p ? esc(formatNumber(p.cost || 0)) : ''}" ${p ? 'autofocus' : ''}></label>
-      <label class="field">قیمت فروش<input name="price" inputmode="decimal" required value="${p ? esc(formatNumber(p.price)) : ''}"></label>
+      <label class="field"><span class="cost-lbl">قیمت خرید (فی دانه)</span><input name="cost" inputmode="decimal" required value="${p ? esc(formatNumber(p.cost || 0)) : ''}" ${p ? 'autofocus' : ''}></label>
+      <label class="field"><span class="price-lbl">قیمت فروش</span><input name="price" inputmode="decimal" required value="${p ? esc(formatNumber(p.price)) : ''}"></label>
     </div>
     <div class="row">مفاد: <span class="margin-pill" id="margin">—</span></div>
-    <label class="field">تعداد دریافتی<input name="qty" inputmode="numeric" required value="${toDariDigits(1)}"></label>
-    <div class="qty-add">${[1, 6, 12, 24, 48].map((n) => `<button type="button" class="btn" data-add="${n}">+${toDariDigits(n)}${n >= 12 ? ' (کارتن)' : ''}</button>`).join('')}
-      <button type="button" class="btn" data-add="0">صفر</button></div>
+    <label class="field"><span class="qty-lbl">تعداد دریافتی</span><input name="qty" inputmode="decimal" required value="${toDariDigits(1)}"></label>
+    <div class="qty-add"></div>
     <button class="btn primary big" type="submit">ذخیره و افزودن به گدام</button></form>`;
   const form = $('#itemForm');
   const updMargin = () => {
@@ -629,27 +646,40 @@ async function receiveCode(code) {
   form.addEventListener('input', updMargin);
   form.qty.addEventListener('input', () => { form.qty.dataset.touched = '1'; });
   updMargin();
+  const updUnit = () => {
+    const kg = form.unit.value === 'kg';
+    card.querySelector('.cost-lbl').textContent = kg ? 'قیمت خرید (فی کیلو)' : 'قیمت خرید (فی دانه)';
+    card.querySelector('.price-lbl').textContent = kg ? 'قیمت فروش (فی کیلو)' : 'قیمت فروش';
+    card.querySelector('.qty-lbl').textContent = kg ? 'وزن دریافتی (کیلو)' : 'تعداد دریافتی';
+    card.querySelector('.qty-add').innerHTML = (kg ? [1, 5, 10, 25, 50] : [1, 6, 12, 24, 48]).map((n) =>
+      `<button type="button" class="btn" data-add="${n}">+${toDariDigits(n)}${kg ? (n >= 25 ? ' (بوری)' : ' کیلو') : n >= 12 ? ' (کارتن)' : ''}</button>`).join('')
+      + '<button type="button" class="btn" data-add="0">صفر</button>';
+  };
+  form.unit.onchange = updUnit;
+  updUnit();
   card.querySelector('.qty-add').onclick = (e) => {
     const n = e.target.closest('[data-add]')?.dataset.add;
     if (n === undefined) return;
-    form.qty.value = toDariDigits(n === '0' ? 0 : parseIntSafe(form.qty.value) + +n - (form.qty.dataset.touched ? 0 : 1));
+    const next = n === '0' ? 0 : addQty(parseQty(form.qty.value), +n - (form.qty.dataset.touched ? 0 : 1));
+    form.qty.value = form.unit.value === 'kg' ? qtyInput(next) : toDariDigits(next);
     form.qty.dataset.touched = '1';
   };
   form.onsubmit = async (e) => {
     e.preventDefault();
-    const qty = parseIntSafe(form.qty.value), cost = parseMoney(form.cost.value), price = parseMoney(form.price.value);
-    if (qty <= 0) return toast('تعداد باید بیشتر از صفر باشد', 'err');
+    const unit = form.unit.value === 'kg' ? 'kg' : 'pc';
+    const qty = unit === 'kg' ? parseQty(form.qty.value) : parseIntSafe(form.qty.value), cost = parseMoney(form.cost.value), price = parseMoney(form.price.value);
+    if (qty <= 0) return toast(unit === 'kg' ? 'وزن باید بیشتر از صفر باشد' : 'تعداد باید بیشتر از صفر باشد', 'err');
     if (!price) return toast('قیمت فروش را وارد کنید', 'err');
     const ts = now();
     await db.transaction('rw', db.products, db.receivings, async () => {
       const cur = await db.products.get(code);
-      await db.products.put({ barcode: code, name: form.name.value.trim(), price, cost, stock: (cur?.stock || 0) + qty, quick: cur?.quick || 0, updatedAt: ts, synced: 0 });
+      await db.products.put({ barcode: code, name: form.name.value.trim(), price, cost, stock: addQty(cur?.stock, qty), quick: cur?.quick || 0, unit, updatedAt: ts, synced: 0 });
       await db.receivings.add({ id: randomId(), batchId: state.batch.batchId, supplier: state.batch.supplier, invoiceNo: state.batch.invoiceNo,
-        barcode: code, name: form.name.value.trim(), qty, cost, price, total: qty * cost, userName: state.user.name, timestamp: ts, updatedAt: ts, synced: 0,
+        barcode: code, name: form.name.value.trim(), qty, unit, cost, price, total: Math.round(qty * cost), userName: state.user.name, timestamp: ts, updatedAt: ts, synced: 0,
         priceChanged: cur ? cur.price !== price : false });
     });
     beep('done');
-    toast(`${toDariDigits(qty)} عدد «${form.name.value.trim()}» به گدام اضافه شد`, 'ok');
+    toast(`${unit === 'kg' ? formatQty(qty, 'kg') : toDariDigits(qty) + ' عدد'} «${form.name.value.trim()}» به گدام اضافه شد`, 'ok');
     refreshBadge();
     await renderReceive();
   };
@@ -671,8 +701,8 @@ async function renderProducts() {
     const all = await db.products.orderBy('name').toArray();
     const list = q ? all.filter((p) => p.name.includes(q) || p.barcode.includes(nq)) : all;
     $('#prodRows').innerHTML = list.map((p) => `<tr class="${(p.stock || 0) <= state.s.lowStock ? 'low' : ''}">
-      <td>${esc(p.name)}</td><td><span class="ltr small">${esc(p.barcode)}</span></td><td>${m(p.price)}</td><td>${m(p.cost || 0)}</td>
-      <td>${toDariDigits(marginPct(p.cost || 0, p.price))}٪</td><td>${toDariDigits(p.stock || 0)}</td><td>${p.quick ? '⭐' : ''}</td>
+      <td>${p.unit === 'kg' ? '⚖ ' : ''}${esc(p.name)}</td><td><span class="ltr small">${esc(p.barcode)}</span></td><td>${priceLabel(p)}</td><td>${m(p.cost || 0)}</td>
+      <td>${toDariDigits(marginPct(p.cost || 0, p.price))}٪</td><td>${formatQty(p.stock || 0, p.unit)}</td><td>${p.quick ? '⭐' : ''}</td>
       <td><button class="btn small" data-edit="${esc(p.barcode)}">ویرایش</button></td></tr>`).join('')
       || '<tr><td colspan="8" class="empty">جنسی نیست</td></tr>';
   };
@@ -680,8 +710,8 @@ async function renderProducts() {
   $('#prodRows').onclick = async (e) => { const bc = e.target.closest('[data-edit]')?.dataset.edit; if (bc) editProduct(await db.products.get(bc), () => draw($('#prodSearch').value.trim())); };
   $('#newProd').onclick = () => editProduct({}, () => draw());
   $('#expCsv').onclick = async () => {
-    const rows = [['barcode', 'name', 'price', 'cost', 'stock', 'quick']];
-    for (const p of await db.products.toArray()) rows.push([p.barcode, p.name, p.price / 100, (p.cost || 0) / 100, p.stock || 0, p.quick ? 1 : 0]);
+    const rows = [['barcode', 'name', 'price', 'cost', 'stock', 'quick', 'unit']];
+    for (const p of await db.products.toArray()) rows.push([p.barcode, p.name, p.price / 100, (p.cost || 0) / 100, p.stock || 0, p.quick ? 1 : 0, p.unit === 'kg' ? 'kg' : 'pc']);
     download(`products-${new Date().toISOString().slice(0, 10)}.csv`, '﻿' + toCsv(rows), 'text/csv;charset=utf-8');
   };
   $('#impCsv').onclick = async () => {
@@ -697,9 +727,10 @@ async function renderProducts() {
         const bc = normalizeBarcode(r[ix('barcode')] || '');
         if (!bc) continue;
         const cur = await db.products.get(bc);
-        await db.products.put({ barcode: bc, name: (r[ix('name')] || '').trim(), price: parseMoney(r[ix('price')]),
+        const unit = ix('unit') >= 0 ? normalizeUnit(r[ix('unit')]) : cur?.unit || 'pc';
+        await db.products.put({ barcode: bc, name: (r[ix('name')] || '').trim(), price: parseMoney(r[ix('price')]), unit,
           cost: ix('cost') >= 0 ? parseMoney(r[ix('cost')]) : cur?.cost || 0,
-          stock: ix('stock') >= 0 ? parseIntSafe(r[ix('stock')]) : cur?.stock || 0,
+          stock: ix('stock') >= 0 ? (unit === 'kg' ? parseQty(r[ix('stock')]) : parseIntSafe(r[ix('stock')])) : cur?.stock || 0,
           quick: ix('quick') >= 0 ? (parseIntSafe(r[ix('quick')]) ? 1 : 0) : cur?.quick || 0, updatedAt: ts, synced: 0 });
         n++;
       }
@@ -720,9 +751,10 @@ function editProduct(p, after) {
     <label class="field">بارکد<div class="row"><input name="barcode" class="grow ltr" required value="${esc(p.barcode || '')}" ${isNew ? '' : 'readonly'}>
       ${isNew ? '<button type="button" class="btn small" id="genCode">تولید کد داخلی</button>' : ''}</div></label>
     <label class="field">نام<input name="name" required value="${esc(p.name || '')}"></label>
-    <div class="grid2"><label class="field">قیمت فروش<input name="price" inputmode="decimal" required value="${p.price != null ? esc(formatNumber(p.price)) : ''}"></label>
+    ${unitSelectHtml(p.unit)}
+    <div class="grid2"><label class="field"><span class="price-lbl">قیمت فروش</span><input name="price" inputmode="decimal" required value="${p.price != null ? esc(formatNumber(p.price)) : ''}"></label>
     <label class="field">قیمت خرید<input name="cost" inputmode="decimal" value="${p.cost != null ? esc(formatNumber(p.cost)) : ''}"></label></div>
-    <label class="field">موجودی<input name="stock" inputmode="numeric" value="${toDariDigits(p.stock || 0)}"></label>
+    <label class="field"><span class="stock-lbl">موجودی</span><input name="stock" inputmode="decimal" value="${p.unit === 'kg' ? qtyInput(p.stock || 0) : toDariDigits(p.stock || 0)}"></label>
     <label class="check"><input type="checkbox" name="quick" ${p.quick ? 'checked' : ''}> دکمه سریع در صفحه فروش (برای نان، میوه و ...)</label>
     <div class="actions"><button class="btn primary" type="submit">ذخیره</button>
       ${isNew ? '' : '<button class="btn" type="button" data-label>🏷 چاپ لیبل QR</button><button class="btn danger" type="button" data-del>حذف</button>'}
@@ -730,6 +762,13 @@ function editProduct(p, after) {
     dismiss: false,
     onMount: (box, close) => {
       const f = box.querySelector('#pf');
+      const updUnit = () => {
+        const kg = f.unit.value === 'kg';
+        box.querySelector('.price-lbl').textContent = kg ? 'قیمت فروش (فی کیلو)' : 'قیمت فروش';
+        box.querySelector('.stock-lbl').textContent = kg ? 'موجودی (کیلو)' : 'موجودی';
+      };
+      f.unit.onchange = updUnit;
+      updUnit();
       box.querySelector('[data-no]').onclick = close;
       box.querySelector('#genCode')?.addEventListener('click', async () => { f.barcode.value = internalBarcode(await nextSeq('internalSeq')); });
       box.querySelector('[data-label]')?.addEventListener('click', () => printHtml(labelDoc(p), state.s.paperWidth));
@@ -742,8 +781,9 @@ function editProduct(p, after) {
         e.preventDefault();
         const bc = normalizeBarcode(f.barcode.value);
         if (isNew && (await db.products.get(bc))) return toast('این بارکد قبلاً ثبت شده است', 'err');
-        await db.products.put({ barcode: bc, name: f.name.value.trim(), price: parseMoney(f.price.value), cost: parseMoney(f.cost.value),
-          stock: parseIntSafe(f.stock.value), quick: f.quick.checked ? 1 : 0, updatedAt: now(), synced: 0 });
+        const unit = f.unit.value === 'kg' ? 'kg' : 'pc';
+        await db.products.put({ barcode: bc, name: f.name.value.trim(), price: parseMoney(f.price.value), cost: parseMoney(f.cost.value), unit,
+          stock: unit === 'kg' ? parseQty(f.stock.value) : parseIntSafe(f.stock.value), quick: f.quick.checked ? 1 : 0, updatedAt: now(), synced: 0 });
         close(); toast('ذخیره شد', 'ok'); refreshBadge(); after?.();
       };
     }
@@ -757,10 +797,10 @@ async function renderReports(dateStr) {
   const sales = await db.sales.where('timestamp').between(start.toISOString(), end.toISOString()).reverse().toArray();
   const good = sales.filter((s) => !s.voided);
   const net = good.reduce((a, s) => a + s.total, 0);
-  const cost = good.reduce((a, s) => a + s.items.reduce((b, l) => b + (l.cost || 0) * l.qty, 0), 0);
+  const cost = good.reduce((a, s) => a + s.items.reduce((b, l) => b + Math.round((l.cost || 0) * l.qty), 0), 0);
   const voids = sales.filter((s) => s.voided);
   const top = new Map();
-  for (const s of good) for (const l of s.items) { const t = top.get(l.barcode) || { name: l.name, qty: 0, total: 0 }; t.qty += l.qty; t.total += l.qty * l.price; top.set(l.barcode, t); }
+  for (const s of good) for (const l of s.items) { const t = top.get(l.barcode) || { name: l.name, qty: 0, total: 0, unit: l.unit }; t.qty = addQty(t.qty, l.qty); t.total += lineTotal(l); top.set(l.barcode, t); }
   const topList = [...top.values()].sort((a, b) => b.total - a.total).slice(0, 10);
   const shifts = await db.shifts.orderBy('openedAt').reverse().limit(15).toArray();
   const low = (await db.products.toArray()).filter((p) => (p.stock || 0) <= state.s.lowStock).slice(0, 30);
@@ -777,7 +817,7 @@ async function renderReports(dateStr) {
       <div class="stat"><div class="k">باطل شده</div><div class="v">${toDariDigits(voids.length)} · ${m(voids.reduce((a, x) => a + x.total, 0))}</div></div>
     </div>
     <div class="grid2">
-      <div class="card"><h3>پرفروش‌ترین اجناس</h3>${topList.length ? `<table><tbody>${topList.map((t) => `<tr><td>${esc(t.name)}</td><td>${toDariDigits(t.qty)}</td><td>${m(t.total)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">—</p>'}</div>
+      <div class="card"><h3>پرفروش‌ترین اجناس</h3>${topList.length ? `<table><tbody>${topList.map((t) => `<tr><td>${esc(t.name)}</td><td>${formatQty(t.qty, t.unit)}</td><td>${m(t.total)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">—</p>'}</div>
       <div class="card"><h3>موجودی کم (≤ ${toDariDigits(s.lowStock)})</h3>${low.length ? `<table><tbody>${low.map((p) => `<tr><td>${esc(p.name)}</td><td>${toDariDigits(p.stock || 0)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">همه خوب است</p>'}</div>
     </div>
     <div class="card"><h3>رسیدها</h3><div class="table-wrap"><table><thead><tr><th>رسید</th><th>زمان</th><th>صندوقدار</th><th>مجموع</th><th>دریافتی</th><th>باقی</th><th>همگام</th></tr></thead><tbody id="rcptRows">
@@ -795,7 +835,7 @@ async function renderReports(dateStr) {
   $('#scanRcpt').onclick = (e) => toggleCamera('camBox', reportsCode, e.currentTarget);
   $('#expSales').onclick = () => {
     const rows = [['receiptId', 'timestamp', 'cashier', 'barcode', 'item', 'qty', 'price', 'lineTotal', 'receiptTotal', 'cashReceived', 'change', 'voided']];
-    for (const x of sales) for (const l of x.items) rows.push([x.receiptId, x.timestamp, x.cashierName, l.barcode, l.name, l.qty, l.price / 100, (l.price * l.qty) / 100, x.total / 100, x.cashReceived / 100, x.changeGiven / 100, x.voided ? 1 : 0]);
+    for (const x of sales) for (const l of x.items) rows.push([x.receiptId, x.timestamp, x.cashierName, l.barcode, l.name, l.qty, l.price / 100, lineTotal(l) / 100, x.total / 100, x.cashReceived / 100, x.changeGiven / 100, x.voided ? 1 : 0]);
     download(`sales-${day}.csv`, '﻿' + toCsv(rows), 'text/csv;charset=utf-8');
   };
 }
@@ -908,3 +948,46 @@ async function renderSettings() {
 }
 
 boot();
+
+// ====================================================================== sold by weight (kg)
+function priceLabel(p) { return m(p.price) + (p.unit === 'kg' ? ' / کیلو' : ''); }
+function qtyInput(q) { return toDariDigits(String(round3(q)).replace('.', '٫')); }
+function unitSelectHtml(unit) {
+  return `<label class="field">واحد فروش<select name="unit">
+    <option value="pc" ${unit !== 'kg' ? 'selected' : ''}>دانه (با تعداد)</option>
+    <option value="kg" ${unit === 'kg' ? 'selected' : ''}>کیلو (با وزن — میوه، سبزی، برنج، گوشت)</option></select></label>`;
+}
+
+/** Ask the cashier for a weight. They can type kg from the scale, or the money amount the customer wants ("۵۰ افغانی بده"). */
+function askWeight(p, current) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v, close) => { if (done) return; done = true; close(); resolve(v); };
+    modal(`<h2>⚖ ${esc(p.name)}</h2><p class="muted">قیمت: ${priceLabel(p)}</p>
+      <form class="stack" id="wf">
+        <label class="field">وزن (کیلو) — از ترازو بخوانید<input name="w" inputmode="decimal" autocomplete="off" autofocus value="${current ? qtyInput(current) : ''}" placeholder="مثلاً ۱٫۲۵"></label>
+        <div class="qty-add">${[0.25, 0.5, 1, 2, 5].map((n) => `<button type="button" class="btn" data-kg="${n}">${formatQty(n, 'kg')}</button>`).join('')}</div>
+        <label class="field">یا مبلغ (افغانی) — مشتری چند پول جنس می‌خواهد<input name="amt" inputmode="decimal" autocomplete="off" placeholder="مثلاً ۵۰"></label>
+        <div class="change-box"><div>قیمت این وزن</div><div class="v num" id="wTotal">${m(0)}</div></div>
+        <div class="actions"><button class="btn primary grow" type="submit">افزودن به سبد</button><button class="btn" type="button" data-no>لغو</button></div>
+      </form>`, {
+      dismiss: false,
+      onMount: (box, close) => {
+        const f = box.querySelector('#wf');
+        const show = () => { box.querySelector('#wTotal').textContent = m(lineTotal({ price: p.price, qty: parseQty(f.w.value), unit: 'kg' })); };
+        f.w.oninput = () => { f.amt.value = ''; show(); };
+        f.amt.oninput = () => { const w = weightForAmount(parseMoney(f.amt.value), p.price); f.w.value = w ? qtyInput(w) : ''; show(); };
+        box.querySelector('.qty-add').onclick = (e) => { const k = e.target.closest('[data-kg]')?.dataset.kg; if (k) { f.w.value = qtyInput(+k); f.amt.value = ''; show(); f.w.focus(); } };
+        box.querySelector('[data-no]').onclick = () => finish(null, close);
+        f.onsubmit = (e) => {
+          e.preventDefault();
+          const w = parseQty(f.w.value);
+          if (w <= 0) return toast('وزن را وارد کنید', 'err');
+          if (w > 500) return toast('وزن بیش از حد است — دوباره ببینید', 'err');
+          finish(w, close);
+        };
+        show();
+      }
+    });
+  });
+}

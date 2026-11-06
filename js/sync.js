@@ -1,6 +1,7 @@
 // Online-only part: pushes queued records to the Google Apps Script web app and pulls users / prices.
 // Everything else works without internet. Records stay synced=0 until the server answers {ok:true}.
 import { db, getSettings, setSetting } from './db.js';
+import { normalizeUnit } from './logic.js';
 
 const TABLES = ['sales', 'receivings', 'shifts', 'movements', 'products'];
 const BATCH = 200;
@@ -92,7 +93,8 @@ export async function pullProducts() {
       const cur = await db.products.get(String(p.barcode));
       await db.products.put({
         barcode: String(p.barcode), name: String(p.name || cur?.name || ''), price: num(p.price ?? cur?.price),
-        cost: num(p.cost ?? cur?.cost), stock: cur ? cur.stock : num(p.stock), quick: cur?.quick || 0,
+        cost: num(p.cost ?? cur?.cost), stock: cur ? cur.stock : Math.max(0, Number(p.stock) || 0), quick: cur?.quick || 0,
+        unit: p.unit ? normalizeUnit(p.unit) : cur?.unit || 'pc',
         updatedAt: cur?.updatedAt || new Date().toISOString(), synced: 1
       });
       n++;

@@ -48,9 +48,41 @@ export function formatMoney(pul, opts = {}) {
   return formatNumber(pul, opts) + (opts.latin ? ' AFN' : ' ؋');
 }
 
+// ---------- quantities: pieces (integer) or kg (decimal, 3 places = grams) ----------
+export const round3 = (n) => Math.round(n * 1000) / 1000;
+export function addQty(a, b) { return round3((Number(a) || 0) + (Number(b) || 0)); }
+
+export function parseQty(str) {
+  const s = toLatinDigits(String(str ?? '')).trim().replace(/[٫,]/g, '.').replace(/[^\d.\-]/g, '');
+  const n = Number(s);
+  if (!s || !Number.isFinite(n) || n <= 0) return 0;
+  return Math.floor(n * 1000 + 1e-6) / 1000;
+}
+
+export function normalizeUnit(v) {
+  return /^\s*(kg|kilo|kilogram|کیلو|کیلوگرام|کیلو گرام)\s*$/i.test(String(v ?? '')) ? 'kg' : 'pc';
+}
+
+export function formatQty(qty, unit) {
+  if (unit !== 'kg') return toDariDigits(String(qty));
+  const s = String(round3(qty)).replace('.', '٫');
+  return toDariDigits(s) + ' کیلو';
+}
+
+// Weighed lines round to whole afghani (shops don't hand out pul), so "۵۰ افغانی پیاز" charges exactly ۵۰.
+export function lineTotal(l) {
+  return l.unit === 'kg' ? Math.round((l.price * l.qty) / 100) * 100 : Math.round(l.price * l.qty);
+}
+
+/** "Give me 50 AFN of tomatoes": weight (kg) for an amount at a price per kg, rounded down to the gram. */
+export function weightForAmount(amount, pricePerKg) {
+  if (!pricePerKg || amount <= 0) return 0;
+  return Math.floor((amount / pricePerKg) * 1000 + 1e-6) / 1000;
+}
+
 export function cartTotals(lines) {
   let items = 0, total = 0;
-  for (const l of lines) { items += l.qty; total += l.price * l.qty; }
+  for (const l of lines) { items += l.unit === 'kg' ? 1 : l.qty; total += lineTotal(l); }
   return { items, total };
 }
 
@@ -192,7 +224,7 @@ export function parseCsv(text) {
 export function applySaleToStock(products, lines, direction) {
   for (const l of lines) {
     const p = products.get(l.barcode);
-    if (p) p.stock = (p.stock || 0) + direction * l.qty;
+    if (p) p.stock = addQty(p.stock, direction * l.qty);
   }
   return products;
 }

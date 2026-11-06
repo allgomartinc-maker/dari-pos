@@ -199,3 +199,6 @@ tr.voided td { text-decoration: line-through; color: var(--muted); }
   .line-total { text-align: center; }
 }
 @media print { body * { visibility: hidden; } }
+
+/* sold by weight */
+.weight-btn { border: 1px solid var(--border); background: var(--surface); border-radius: 10px; padding: 6px 10px; font-weight: 700; cursor: pointer; min-height: 40px; white-space: nowrap; }

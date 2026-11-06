@@ -107,3 +107,21 @@ test('text that looks like a spreadsheet formula is written as plain text', () =
   assert.equal(sheets.Cash_Movements.rows[1][6], "'@x");
   assert.equal(sheets.Cash_Movements.rows[1][4], 1); // numbers untouched
 });
+
+test('weighed lines: two weighings of the same item stay two rows; kg counts as one item; unit column round-trips', () => {
+  const { sheets, props, call } = load();
+  const s = { ...sale(), items: [
+    { barcode: '2000000000015', name: 'بادنجان رومی', qty: 1.25, unit: 'kg', price: 6000, cost: 4500 },
+    { barcode: '2000000000015', name: 'بادنجان رومی', qty: 0.5, unit: 'kg', price: 6000, cost: 4500 }
+  ], total: 10500 };
+  call({ action: 'push', token: props.SYNC_TOKEN, sales: [s], products: [{ barcode: '2000000000015', name: 'بادنجان رومی', price: 6000, cost: 4500, stock: 48.25, unit: 'kg' }] });
+  call({ action: 'push', token: props.SYNC_TOKEN, sales: [s] }); // re-push must not duplicate
+  assert.equal(sheets.Sale_Items.rows.length, 3);
+  assert.equal(sheets.Sale_Items.rows[1][6], 75);
+  assert.equal(sheets.Sales.rows[1][7], 2);       // item count
+  assert.equal(sheets.Sales.rows[1][12], 78.75);  // cost 1.25*45 + 0.5*45
+  assert.equal(sheets.Inventory.rows[1][9], 'kg');
+  const res = call({ action: 'products', token: props.SYNC_TOKEN });
+  assert.equal(res.products[0].unit, 'kg');
+  assert.equal(res.products[0].stock, 48.25);
+});

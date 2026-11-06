@@ -2,7 +2,7 @@
 //  1) HTML in a hidden iframe + window.print()  (any printer the OS knows, USB/system thermal printers)
 //  2) Canvas -> 1-bit raster -> ESC/POS over Web Bluetooth (Dari text can't use printer code pages,
 //     so we draw it with the browser's font shaping and send it as an image — works on any ESC/POS printer).
-import { formatMoney, dariDate, receiptQr, packRaster, escposRasterCommand, toDariDigits, AFN_DENOMS, formatNumber } from './logic.js';
+import { formatMoney, dariDate, receiptQr, packRaster, escposRasterCommand, toDariDigits, AFN_DENOMS, formatNumber, formatQty, lineTotal } from './logic.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -21,7 +21,7 @@ export function receiptDoc(sale, s) {
   ];
   for (const l of sale.items) {
     d.push({ t: 'text', text: l.name });
-    d.push({ t: 'row', a: `${toDariDigits(l.qty)} × ${formatMoney(l.price)}`, b: formatMoney(l.qty * l.price), indent: true });
+    d.push({ t: 'row', a: `${formatQty(l.qty, l.unit)} × ${formatMoney(l.price)}${l.unit === 'kg' ? '/کیلو' : ''}`, b: formatMoney(lineTotal(l)), indent: true });
   }
   d.push({ t: 'hr2' },
     { t: 'row', a: 'مجموع:', b: formatMoney(sale.total), bold: true, size: 'lg' },

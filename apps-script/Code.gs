@@ -16,7 +16,7 @@ var TABS = {
   Sales: ['Receipt ID / شماره رسید', 'Time / زمان', 'Shift / شفت', 'Cashier / صندوقدار', 'Total / مجموع', 'Cash Tendered / نقد دریافتی',
     'Change / باقی', 'Items / تعداد', 'Items Summary / اجناس', 'Status / وضعیت', 'Device / دستگاه', 'Synced At / زمان همگام', 'Cost / قیمت خرید', 'Profit / مفاد', 'Voided By / باطل توسط'],
   Sale_Items: ['Receipt ID / شماره رسید', 'Time / زمان', 'Barcode / بارکد', 'Item / جنس', 'Qty / تعداد', 'Price / قیمت', 'Line Total / مجموع', 'Unit Cost / قیمت خرید', 'Price Override / تغییر قیمت', 'Key'],
-  Inventory: ['Barcode / بارکد', 'Name / نام', 'Price / قیمت فروش', 'Cost / قیمت خرید', 'Stock / موجودی', 'Margin % / مفاد', 'Quick / سریع', 'Updated / به‌روز شده', 'Device / دستگاه'],
+  Inventory: ['Barcode / بارکد', 'Name / نام', 'Price / قیمت فروش', 'Cost / قیمت خرید', 'Stock / موجودی', 'Margin % / مفاد', 'Quick / سریع', 'Updated / به‌روز شده', 'Device / دستگاه', 'Unit / واحد (pc / kg)'],
   Purchases: ['ID', 'Time / زمان', 'Batch / محموله', 'Supplier / عرضه‌کننده', 'Invoice / فاکتور', 'Barcode / بارکد', 'Item / جنس', 'Qty / تعداد', 'Unit Cost / قیمت خرید', 'Retail / قیمت فروش', 'Line Cost / مجموع', 'Received By / دریافت کننده', 'Price Changed / تغییر قیمت'],
   Shift_Reconciliation: ['Shift ID / شفت', 'Cashier / صندوقدار', 'Opened / باز شد', 'Closed / بسته شد', 'Start Float / پول آغاز', 'Net Cash Sales / فروش خالص', 'Pay-ins / افزوده',
     'Payouts / مصارف', 'Drops / برداشت', 'Expected / متوقع', 'Counted / شمارش', 'Variance / تفاوت', 'Status / وضعیت', 'Transactions / معاملات', 'Closed By / بسته کننده', 'Denominations / نوت‌ها'],
@@ -113,21 +113,24 @@ function push(ss, b) {
   var sales = b.sales || [], items = [];
   upsert(ss.getSheetByName('Sales'), 1, sales.map(function (s) {
     var cost = 0, qty = 0;
-    s.items.forEach(function (l) {
-      cost += (l.cost || 0) * l.qty; qty += l.qty;
-      items.push([s.receiptId, dt(s.timestamp), l.barcode, l.name, l.qty, afn(l.price), afn(l.price * l.qty), afn(l.cost), l.override ? ('Yes: ' + (l.approvedBy || '')) : '', s.receiptId + '|' + l.barcode + '|' + l.price]);
+    s.items.forEach(function (l, i) {
+      var kg = l.unit === 'kg';
+      cost += Math.round((l.cost || 0) * l.qty); qty += kg ? 1 : l.qty;
+      // Each weighing is its own line, so weighed lines get their position in the key.
+      items.push([s.receiptId, dt(s.timestamp), l.barcode, l.name, kg ? l.qty + ' kg' : l.qty, afn(l.price), kg ? Math.round(l.price * l.qty / 100) : afn(l.price * l.qty), afn(l.cost), l.override ? ('Yes: ' + (l.approvedBy || '')) : '',
+        s.receiptId + '|' + l.barcode + '|' + l.price + (kg ? '|' + i : '')]);
     });
     return [s.receiptId, dt(s.timestamp), s.shiftId, s.cashierName, afn(s.total), afn(s.cashReceived), afn(s.changeGiven), qty,
-      s.items.map(function (l) { return l.name + ' ×' + l.qty; }).join('، '), s.voided ? 'Voided' : 'Completed', dev, now,
+      s.items.map(function (l) { return l.name + ' ×' + l.qty + (l.unit === 'kg' ? ' kg' : ''); }).join('، '), s.voided ? 'Voided' : 'Completed', dev, now,
       afn(cost), s.voided ? 0 : afn(s.total - cost), s.voidedBy || ''];
   }));
   upsert(ss.getSheetByName('Sale_Items'), 10, items);
   upsert(ss.getSheetByName('Inventory'), 1, (b.products || []).map(function (p) {
     var margin = p.price ? Math.round(((p.price - (p.cost || 0)) / p.price) * 100) : 0;
-    return [String(p.barcode), p.name, afn(p.price), afn(p.cost), p.stock || 0, margin, p.quick ? 1 : 0, dt(p.updatedAt), dev];
+    return [String(p.barcode), p.name, afn(p.price), afn(p.cost), p.stock || 0, margin, p.quick ? 1 : 0, dt(p.updatedAt), dev, p.unit === 'kg' ? 'kg' : 'pc'];
   }));
   upsert(ss.getSheetByName('Purchases'), 1, (b.receivings || []).map(function (r) {
-    return [r.id, dt(r.timestamp), r.batchId, r.supplier, r.invoiceNo, String(r.barcode), r.name, r.qty, afn(r.cost), afn(r.price), afn(r.qty * r.cost), r.userName, r.priceChanged ? 'Yes' : ''];
+    return [r.id, dt(r.timestamp), r.batchId, r.supplier, r.invoiceNo, String(r.barcode), r.name, r.unit === 'kg' ? r.qty + ' kg' : r.qty, afn(r.cost), afn(r.price), afn(r.qty * r.cost), r.userName, r.priceChanged ? 'Yes' : ''];
   }));
   upsert(ss.getSheetByName('Shift_Reconciliation'), 1, (b.shifts || []).map(function (s) {
     var closed = s.status === 'closed';
@@ -166,7 +169,8 @@ function users(ss) {
 function products(ss) {
   var sh = ss.getSheetByName('Inventory');
   if (!sh || sh.getLastRow() < 2) return [];
-  return sh.getRange(2, 1, sh.getLastRow() - 1, 5).getValues().filter(function (r) { return r[0] !== ''; }).map(function (r) {
-    return { barcode: String(r[0]), name: String(r[1]), price: Math.round(Number(r[2]) * 100), cost: Math.round(Number(r[3]) * 100), stock: Number(r[4]) || 0 };
+  return sh.getRange(2, 1, sh.getLastRow() - 1, 10).getValues().filter(function (r) { return r[0] !== ''; }).map(function (r) {
+    var unit = /^\s*(kg|کیلو)/i.test(String(r[9] || '')) ? 'kg' : 'pc';
+    return { barcode: String(r[0]), name: String(r[1]), price: Math.round(Number(r[2]) * 100), cost: Math.round(Number(r[3]) * 100), stock: Number(r[4]) || 0, unit: unit };
   });
 }
