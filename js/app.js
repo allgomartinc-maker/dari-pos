@@ -1,0 +1,910 @@
+// Dari POS — app controller. Views: lock, setup, register, receive, products, shift, reports, settings.
+import {
+  formatMoney, formatNumber, parseMoney, parseIntSafe, toDariDigits, cartTotals, changeDue, marginPct, QUICK_CASH,
+  AFN_DENOMS, countDenoms, shiftExpected, varianceStatus, makeReceiptId, parseReceiptQr, eanValid, normalizeBarcode,
+  randomId, internalBarcode, toCsv, parseCsv, dariDate
+} from './logic.js';
+import {
+  db, getSettings, setSetting, nextSeq, createUser, setUserPin, findUserByPin, pinInUse, openShift, pendingCount,
+  exportBackup, importBackup, requestPersistentStorage
+} from './db.js';
+import { syncNow, startAutoSync, onSyncChange, pullUsers, pullProducts } from './sync.js';
+import { receiptDoc, zReportDoc, labelDoc, printHtml, printBluetooth, connectBluetooth, bluetoothSupported, bluetoothName } from './print.js';
+import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep } from './scanner.js';
+import { $, $$, esc, toast, modal, confirmBox, formBox, keypadHtml, bindPinPad, askPin, download, pickFile } from './ui.js';
+
+const m = (p) => formatMoney(p);
+const now = () => new Date().toISOString();
+const state = { user: null, s: null, view: 'register', cart: [], tendered: '', batch: null, item: null };
+
+const VIEWS = [
+  ['register', '🛒 فروش', 'cashier'],
+  ['shift', '💵 شفت', 'cashier'],
+  ['receive', '📦 دریافت جنس', 'admin'],
+  ['products', '🏷️ اجناس', 'admin'],
+  ['reports', '📊 گزارش‌ها', 'admin'],
+  ['settings', '⚙️ تنظیمات', 'admin']
+];
+const isAdmin = () => state.user?.role === 'admin';
+
+async function requireAdmin(reason) {
+  if (isAdmin()) return state.user;
+  return askPin(reason || 'تأیید مدیر لازم است', { role: 'admin' });
+}
+
+// ====================================================================== boot
+async function boot() {
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+  requestPersistentStorage();
+  state.s = await getSettings();
+  initWedge();
+  setScanHandler((code) => onScan(code));
+  onSyncChange(() => refreshBadge());
+  window.addEventListener('online', refreshBadge);
+  window.addEventListener('offline', refreshBadge);
+  setInterval(refreshBadge, 15000);
+  $('#lockBtn').onclick = lock;
+  $('#syncBadge').onclick = async () => {
+    if (!state.s.webhookUrl) return toast('آدرس گوگل شیت در تنظیمات وارد نشده است');
+    const r = await syncNow();
+    if (r.ok) toast(`همگام شد (${toDariDigits(r.sent)} ریکارد)`, 'ok');
+    else if (r.reason === 'offline') toast('انترنت وصل نیست — اطلاعات در دستگاه محفوظ است');
+    else if (r.error) toast('خطای همگام‌سازی: ' + r.error, 'err');
+  };
+  startAutoSync();
+  idleLock();
+  if (!state.s.setupDone) renderSetup(); else renderLock();
+}
+
+function idleLock() {
+  let t;
+  const reset = () => { clearTimeout(t); t = setTimeout(() => { if (state.user) lock(); }, 15 * 60 * 1000); };
+  ['pointerdown', 'keydown'].forEach((ev) => document.addEventListener(ev, reset, true));
+  reset();
+}
+
+async function refreshBadge() {
+  const b = $('#syncBadge');
+  if (!b) return;
+  const n = await pendingCount();
+  const s = await getSettings();
+  state.s = s;
+  if (!s.webhookUrl) { b.className = 'badge offline'; b.textContent = `⚪ فقط دستگاه (${toDariDigits(n)} ریکارد محلی)`; b.title = 'گوگل شیت در تنظیمات وصل نشده'; }
+  else if (!navigator.onLine) { b.className = 'badge offline'; b.textContent = `🟠 آفلاین (${toDariDigits(n)} در انتظار)`; }
+  else if (s.lastSyncError && n) { b.className = 'badge error'; b.textContent = `🔴 خطا (${toDariDigits(n)} در انتظار)`; b.title = s.lastSyncError; }
+  else if (n) { b.className = 'badge offline'; b.textContent = `🟡 آنلاین (${toDariDigits(n)} در انتظار)`; }
+  else { b.className = 'badge online'; b.textContent = s.webhookUrl ? '🟢 آنلاین (همگام)' : '🟢 آنلاین'; }
+}
+
+// ====================================================================== setup & lock
+function renderSetup() {
+  $('#topbar').classList.add('hidden');
+  $('#main').innerHTML = `<div class="center-screen"><form class="card setup stack" id="setupForm">
+    <h2>راه‌اندازی صندوق</h2>
+    <p class="muted">این تنظیمات فقط یک بار انجام می‌شود. همه اطلاعات در همین دستگاه ذخیره می‌شود و بدون انترنت کار می‌کند.</p>
+    <label class="field">نام فروشگاه<input name="storeName" required value="فروشگاه من"></label>
+    <label class="field">کد این دستگاه (برای شماره رسید)<input name="deviceId" required value="T1" maxlength="6" class="ltr"></label>
+    <label class="field">نام مدیر<input name="adminName" required></label>
+    <div class="grid2">
+      <label class="field">رمز مدیر (۴ تا ۶ رقم)<input name="pin" required inputmode="numeric" type="password" autocomplete="new-password"></label>
+      <label class="field">تکرار رمز<input name="pin2" required inputmode="numeric" type="password" autocomplete="new-password"></label>
+    </div>
+    <label class="check"><input type="checkbox" name="sample" checked> افزودن چند جنس نمونه برای آزمایش</label>
+    <button class="btn primary big" type="submit">شروع</button>
+  </form></div>`;
+  $('#setupForm').onsubmit = async (e) => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(e.target));
+    if (!/^\d{4,6}$/.test(toLatin(f.pin))) return toast('رمز باید ۴ تا ۶ رقم باشد', 'err');
+    if (toLatin(f.pin) !== toLatin(f.pin2)) return toast('رمزها یکسان نیستند', 'err');
+    await createUser({ name: f.adminName.trim(), role: 'admin', pin: toLatin(f.pin) });
+    await setSetting('storeName', f.storeName.trim());
+    await setSetting('deviceId', f.deviceId.trim().toUpperCase().replace(/[^A-Z0-9]/g, '') || 'T1');
+    if (f.sample) await addSampleProducts();
+    await setSetting('setupDone', true);
+    state.s = await getSettings();
+    toast('صندوق آماده است. با رمز مدیر وارد شوید.', 'ok');
+    renderLock();
+  };
+}
+const toLatin = (s) => String(s ?? '').replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).trim();
+
+async function addSampleProducts() {
+  const items = [['نان', 1000, 700, 1], ['شیر ۱ لیتر', 6000, 4800, 1], ['تخم مرغ (دانه)', 1000, 800, 1], ['برنج ۱ کیلو', 9000, 7500, 0],
+    ['روغن ۵ لیتر', 65000, 56000, 0], ['چای سبز ۲۵۰ گرم', 12000, 9000, 0], ['بوره ۱ کیلو', 7000, 6000, 0], ['آب معدنی', 2000, 1200, 1]];
+  for (const [name, price, cost, quick] of items) {
+    const seq = await nextSeq('internalSeq');
+    await db.products.put({ barcode: internalBarcode(seq), name, price, cost, stock: 50, quick, updatedAt: now(), synced: 0 });
+  }
+}
+
+let failCount = 0, lockedUntil = 0;
+function renderLock() {
+  stopCamera();
+  state.user = null;
+  $('#topbar').classList.add('hidden');
+  $('#main').innerHTML = `<div class="center-screen"><div class="card lock">
+    <h2>${esc(state.s.storeName)}</h2><p class="muted">رمز خود را وارد کنید</p>
+    <div class="pin-dots"></div>${keypadHtml()}
+    <button class="btn primary block" data-k="E" style="margin-top:8px">ورود</button>
+  </div></div>`;
+  bindPinPad($('.lock'), async (pin) => {
+    if (Date.now() < lockedUntil) return toast('چند بار رمز اشتباه شد. ۳۰ ثانیه صبر کنید.', 'err');
+    const u = await findUserByPin(pin);
+    if (!u) {
+      beep('err');
+      if (++failCount >= 5) { lockedUntil = Date.now() + 30000; failCount = 0; }
+      return toast('رمز نادرست است', 'err');
+    }
+    failCount = 0;
+    state.user = u;
+    renderShell();
+    go(isAdmin() ? state.view : 'register');
+  }, { autoLen: 0 });
+}
+
+function lock() { state.cart = []; state.tendered = ''; renderLock(); }
+
+function renderShell() {
+  $('#topbar').classList.remove('hidden');
+  $('#storeTitle').textContent = state.s.storeName;
+  $('#userChip').textContent = `${state.user.name} · ${isAdmin() ? 'مدیر' : 'صندوقدار'}`;
+  $('#nav').innerHTML = VIEWS.filter(([, , r]) => r === 'cashier' || isAdmin())
+    .map(([id, label]) => `<button data-view="${id}">${label}</button>`).join('');
+  $('#nav').onclick = (e) => { const v = e.target.closest('[data-view]')?.dataset.view; if (v) go(v); };
+  refreshBadge();
+}
+
+async function go(view) {
+  const def = VIEWS.find((v) => v[0] === view);
+  if (!def || (def[2] === 'admin' && !isAdmin())) view = 'register';
+  await stopCamera();
+  state.view = view;
+  $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
+  ({ register: renderRegister, shift: renderShift, receive: renderReceive, products: renderProducts, reports: renderReports, settings: renderSettings })[view]();
+}
+
+function onScan(code) {
+  if (!state.user) return;
+  if (state.view === 'register') return registerCode(code);
+  if (state.view === 'receive') return receiveCode(code);
+  if (state.view === 'products') { const i = $('#prodSearch'); if (i) { i.value = code; i.dispatchEvent(new Event('input')); } return; }
+  if (state.view === 'reports') return reportsCode(code);
+}
+
+function bindScanInput(input, handler, { onType } = {}) {
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); const v = normalizeBarcode(input.value); input.value = ''; onType?.(''); if (v) handler(v); }
+  });
+  if (onType) input.addEventListener('input', () => onType(input.value.trim()));
+}
+
+async function toggleCamera(boxId, handler, btn) {
+  const box = $('#' + boxId);
+  if (cameraActive()) { await stopCamera(); box.classList.add('hidden'); btn.textContent = '📷 کمره'; return; }
+  box.classList.remove('hidden');
+  btn.textContent = '✖ بستن کمره';
+  try { await startCamera(boxId, handler); }
+  catch (err) {
+    box.classList.add('hidden'); btn.textContent = '📷 کمره';
+    toast('کمره باز نشد: اجازه کمره را بدهید (فقط روی HTTPS یا localhost کار می‌کند)', 'err');
+    console.warn(err);
+  }
+}
+
+// ====================================================================== register
+async function renderRegister() {
+  const shift = await openShift();
+  if (!shift) {
+    $('#main').innerHTML = `<div class="center-screen"><div class="card setup stack">
+      <h2>شفت باز نیست</h2><p class="muted">برای شروع فروش، اول شفت را با پول موجود در دخل باز کنید.</p>
+      <button class="btn primary big" id="goShift">باز کردن شفت</button></div></div>`;
+    $('#goShift').onclick = () => go('shift');
+    return;
+  }
+  $('#main').innerHTML = `<section class="register">
+    <div class="card">
+      <div class="scanbar">
+        <input id="scanInput" data-scan placeholder="بارکد را اسکن کنید یا نام جنس را بنویسید" autocomplete="off" autofocus>
+        <button class="btn" id="camBtn" type="button">📷 کمره</button>
+      </div>
+      <div id="camBox" class="cam hidden"></div>
+      <div id="results" class="results"></div>
+      <div id="quickGrid" class="quick-grid"></div>
+      <div id="cart" class="cart"></div>
+    </div>
+    <div class="pay stack">
+      <div class="total-due"><div class="k">مجموع قابل پرداخت</div><div class="v num" id="totalDue"></div><div class="small" id="itemCount"></div></div>
+      <div class="card stack">
+        <label class="field tendered">نقد دریافتی<input id="tendered" inputmode="decimal" autocomplete="off" placeholder="۰"></label>
+        <div class="quick-cash">
+          <button class="btn" data-cash="exact">دقیق</button>
+          ${QUICK_CASH.map((d) => `<button class="btn" data-cash="${d}">+${toDariDigits(d)}</button>`).join('')}
+        </div>
+        <div id="changeBox" class="change-box"><div>باقی پول مشتری</div><div class="v num" id="changeDue"></div></div>
+        <button class="btn primary big block" id="completeBtn">✔ تکمیل فروش</button>
+        <div class="row"><button class="btn grow" id="clearTender">پاک کردن پول</button><button class="btn grow" id="clearCart">لغو سبد</button></div>
+      </div>
+    </div>
+  </section>`;
+  const input = $('#scanInput');
+  bindScanInput(input, registerCode, { onType: searchProducts });
+  $('#camBtn').onclick = (e) => toggleCamera('camBox', registerCode, e.currentTarget);
+  $('#tendered').value = state.tendered;
+  $('#tendered').oninput = (e) => { state.tendered = e.target.value; drawPay(); };
+  $('#tendered').onkeydown = (e) => { if (e.key === 'Enter') completeSale(); };
+  $('.quick-cash').onclick = (e) => {
+    const c = e.target.closest('[data-cash]')?.dataset.cash;
+    if (!c) return;
+    const { total } = cartTotals(state.cart);
+    const cur = parseMoney(state.tendered);
+    const next = c === 'exact' ? total : cur + parseInt(c, 10) * 100;
+    state.tendered = formatNumber(next);
+    $('#tendered').value = state.tendered;
+    drawPay();
+  };
+  $('#clearTender').onclick = () => { state.tendered = ''; $('#tendered').value = ''; drawPay(); };
+  $('#clearCart').onclick = async () => { if (state.cart.length && await confirmBox('سبد خرید خالی شود؟')) { state.cart = []; state.tendered = ''; renderRegister(); } };
+  $('#completeBtn').onclick = completeSale;
+  $('#cart').onclick = cartClick;
+  $('#results').onclick = (e) => { const b = e.target.closest('[data-bc]')?.dataset.bc; if (b) { registerCode(b); input.value = ''; $('#results').innerHTML = ''; input.focus(); } };
+  $('#quickGrid').onclick = (e) => { const b = e.target.closest('[data-bc]')?.dataset.bc; if (b) registerCode(b); };
+  const quick = await db.products.where('quick').equals(1).toArray();
+  $('#quickGrid').innerHTML = quick.map((p) => `<button class="btn" data-bc="${esc(p.barcode)}"><span>${esc(p.name)}</span><span class="small muted">${m(p.price)}</span></button>`).join('');
+  drawCart();
+}
+
+async function searchProducts(q) {
+  const box = $('#results');
+  if (!box) return;
+  if (!q || /^\d+$/.test(normalizeBarcode(q))) { box.innerHTML = ''; return; }
+  const list = await db.products.filter((p) => p.name.includes(q)).limit(8).toArray();
+  box.innerHTML = list.map((p) => `<button class="btn" data-bc="${esc(p.barcode)}"><span>${esc(p.name)}</span><span>${m(p.price)}</span></button>`).join('')
+    || '<div class="muted small">چیزی پیدا نشد</div>';
+}
+
+async function registerCode(code) {
+  const r = parseReceiptQr(code);
+  if (r) return showReceipt(r.receiptId);
+  const p = await db.products.get(code);
+  if (!p) {
+    beep('err');
+    if (!eanValid(code)) return toast('بارکد درست خوانده نشد، دوباره اسکن کنید', 'err');
+    if (isAdmin()) {
+      if (await confirmBox(`جنس با بارکد ${code} ثبت نیست. اکنون ثبت شود؟`, { okText: 'ثبت جنس' })) editProduct({ barcode: code }, () => registerCode(code));
+    } else toast('این جنس ثبت نیست — به مدیر بگویید', 'err');
+    return;
+  }
+  beep('ok');
+  const line = state.cart.find((l) => l.barcode === p.barcode && !l.override);
+  if (line) line.qty++;
+  else state.cart.unshift({ barcode: p.barcode, name: p.name, price: p.price, cost: p.cost || 0, qty: 1 });
+  if ((p.stock || 0) <= 0) toast(`موجودی «${p.name}» در سیستم صفر است`);
+  drawCart();
+}
+
+function drawCart() {
+  const c = $('#cart');
+  if (!c) return;
+  c.innerHTML = state.cart.length ? state.cart.map((l, i) => `<div class="cart-line">
+      <div><div class="name">${esc(l.name)}</div><button class="price-btn" data-price="${i}">${m(l.price)}${l.override ? ' ✎' : ''}</button></div>
+      <div class="qty"><button data-dec="${i}" aria-label="کم">−</button><span class="num">${toDariDigits(l.qty)}</span><button data-inc="${i}" aria-label="زیاد">+</button></div>
+      <div class="line-total num">${m(l.price * l.qty)}</div>
+      <button class="btn small" data-del="${i}" aria-label="حذف">🗑</button></div>`).join('')
+    : '<div class="empty">سبد خالی است — جنس را اسکن کنید</div>';
+  drawPay();
+}
+
+function drawPay() {
+  const { items, total } = cartTotals(state.cart);
+  const tendered = parseMoney(state.tendered);
+  const ch = changeDue(total, tendered);
+  $('#totalDue').textContent = m(total);
+  $('#itemCount').textContent = `${toDariDigits(items)} قلم`;
+  const box = $('#changeBox');
+  box.classList.toggle('short', !ch.ok && tendered > 0);
+  box.firstElementChild.textContent = !ch.ok && tendered > 0 ? 'کمبود پول' : 'باقی پول مشتری';
+  $('#changeDue').textContent = m(tendered === 0 ? 0 : ch.ok ? ch.change : ch.short);
+  $('#completeBtn').disabled = !state.cart.length || !ch.ok || tendered === 0;
+}
+
+async function cartClick(e) {
+  const t = e.target.closest('button');
+  if (!t) return;
+  const d = t.dataset;
+  if (d.inc) state.cart[+d.inc].qty++;
+  else if (d.dec) { const l = state.cart[+d.dec]; if (l.qty > 1) l.qty--; else state.cart.splice(+d.dec, 1); }
+  else if (d.del) state.cart.splice(+d.del, 1);
+  else if (d.price) {
+    const l = state.cart[+d.price];
+    const approver = await requireAdmin('تغییر قیمت به تأیید مدیر نیاز دارد');
+    if (!approver) return;
+    const v = await formBox('تغییر قیمت', [{ name: 'price', label: `قیمت جدید برای «${l.name}»`, value: formatNumber(l.price), inputmode: 'decimal' }]);
+    if (!v) return;
+    l.price = parseMoney(v.price);
+    l.override = true;
+    l.approvedBy = approver.name;
+  }
+  drawCart();
+}
+
+async function completeSale() {
+  const { total } = cartTotals(state.cart);
+  const tendered = parseMoney(state.tendered);
+  if (!state.cart.length || tendered < total || !tendered) return;
+  const shift = await openShift();
+  if (!shift) return toast('شفت باز نیست', 'err');
+  const seq = await nextSeq('receiptSeq');
+  const ts = now();
+  const sale = {
+    receiptId: makeReceiptId(state.s.deviceId, seq), shiftId: shift.shiftId, cashierId: state.user.id, cashierName: state.user.name,
+    timestamp: ts, items: state.cart.map((l) => ({ ...l })), total, cashReceived: tendered, changeGiven: tendered - total,
+    voided: 0, synced: 0, updatedAt: ts
+  };
+  await db.transaction('rw', db.sales, db.products, async () => {
+    await db.sales.add(sale);
+    for (const l of sale.items) {
+      const p = await db.products.get(l.barcode);
+      if (p) await db.products.update(l.barcode, { stock: (p.stock || 0) - l.qty, updatedAt: ts, synced: 0 });
+    }
+  });
+  beep('done');
+  state.cart = []; state.tendered = '';
+  renderRegister();
+  refreshBadge();
+  if (navigator.onLine) syncNow({ pull: false }).then(refreshBadge);
+  if (state.s.autoPrint) printHtml(receiptDoc(sale, state.s), state.s.paperWidth);
+  modal(`<h2>فروش ثبت شد ✔</h2>
+    <div class="change-box"><div>باقی پول مشتری</div><div class="v num">${m(sale.changeGiven)}</div></div>
+    <p class="muted">رسید <span class="ltr">${esc(sale.receiptId)}</span> · مجموع ${m(sale.total)} · دریافتی ${m(sale.cashReceived)}</p>
+    <div class="actions">
+      <button class="btn primary grow" data-new autofocus>فروش جدید</button>
+      <button class="btn" data-print>🖨 چاپ رسید</button>
+      ${bluetoothSupported() ? '<button class="btn" data-bt>📶 چاپ بلوتوث</button>' : ''}
+    </div>`, {
+    onMount: (box, close) => {
+      box.querySelector('[data-new]').onclick = () => { close(); $('#scanInput')?.focus(); };
+      box.querySelector('[data-print]').onclick = () => printHtml(receiptDoc(sale, state.s), state.s.paperWidth);
+      box.querySelector('[data-bt]')?.addEventListener('click', () => btPrint(receiptDoc(sale, state.s)));
+    }
+  });
+}
+
+async function btPrint(doc) {
+  try { await printBluetooth(doc, state.s.paperWidth); toast('چاپ شد', 'ok'); }
+  catch (err) { toast('چاپ بلوتوث ناموفق: ' + err.message, 'err'); }
+}
+
+// ====================================================================== receipts (view / reprint / void)
+async function showReceipt(receiptId) {
+  const sale = await db.sales.get(receiptId);
+  if (!sale) return toast('رسید در این دستگاه پیدا نشد', 'err');
+  modal(`<h2>رسید <span class="ltr">${esc(sale.receiptId)}</span></h2>
+    <p class="muted">${esc(dariDate(sale.timestamp))} · ${esc(sale.cashierName)} ${sale.voided ? '· <b style="color:var(--danger)">باطل شده</b>' : ''}</p>
+    <div class="table-wrap"><table><thead><tr><th>جنس</th><th>تعداد</th><th>قیمت</th><th>مجموع</th></tr></thead><tbody>
+    ${sale.items.map((l) => `<tr><td>${esc(l.name)}</td><td>${toDariDigits(l.qty)}</td><td>${m(l.price)}</td><td>${m(l.price * l.qty)}</td></tr>`).join('')}
+    </tbody></table></div>
+    <p><b>مجموع: ${m(sale.total)}</b> · دریافتی: ${m(sale.cashReceived)} · باقی: ${m(sale.changeGiven)}</p>
+    <div class="actions">
+      <button class="btn" data-print>🖨 چاپ دوباره</button>
+      ${bluetoothSupported() ? '<button class="btn" data-bt>📶 بلوتوث</button>' : ''}
+      ${!sale.voided ? '<button class="btn danger" data-void>باطل کردن رسید</button>' : ''}
+      <button class="btn" data-close>بستن</button>
+    </div>`, {
+    onMount: (box, close) => {
+      box.querySelector('[data-close]').onclick = close;
+      box.querySelector('[data-print]').onclick = () => printHtml(receiptDoc(sale, state.s), state.s.paperWidth);
+      box.querySelector('[data-bt]')?.addEventListener('click', () => btPrint(receiptDoc(sale, state.s)));
+      box.querySelector('[data-void]')?.addEventListener('click', async () => {
+        const admin = await requireAdmin('باطل کردن رسید به رمز مدیر نیاز دارد');
+        if (!admin) return;
+        if (!(await confirmBox(`رسید ${sale.receiptId} به مبلغ ${m(sale.total)} باطل شود؟ اجناس به گدام برمی‌گردد.`, { danger: true, okText: 'باطل شود' }))) return;
+        await voidSale(sale, admin);
+        close();
+        toast('رسید باطل شد', 'ok');
+        if (state.view === 'reports') renderReports();
+      });
+    }
+  });
+}
+
+async function voidSale(sale, admin) {
+  const ts = now();
+  await db.transaction('rw', db.sales, db.products, async () => {
+    await db.sales.update(sale.receiptId, { voided: 1, voidedBy: admin.name, voidedAt: ts, updatedAt: ts, synced: 0 });
+    for (const l of sale.items) {
+      const p = await db.products.get(l.barcode);
+      if (p) await db.products.update(l.barcode, { stock: (p.stock || 0) + l.qty, updatedAt: ts, synced: 0 });
+    }
+  });
+  refreshBadge();
+}
+
+// ====================================================================== shift
+async function renderShift() {
+  const shift = await openShift();
+  if (!shift) {
+    const recent = await db.shifts.orderBy('openedAt').reverse().limit(1).toArray();
+    $('#main').innerHTML = `<div class="center-screen"><form class="card setup stack" id="openForm">
+      <h2>باز کردن شفت</h2>
+      <p class="muted">پول موجود در دخل را در آغاز شفت بشمارید و وارد کنید.</p>
+      <label class="field">پول آغاز شفت (افغانی)<input name="float" inputmode="decimal" required autofocus></label>
+      <button class="btn primary big" type="submit">باز کردن شفت</button>
+      ${recent[0] && isAdmin() ? `<button class="btn" type="button" id="lastZ">نمایش آخرین گزارش Z</button>` : ''}
+    </form></div>`;
+    $('#openForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const seq = await nextSeq('shiftSeq');
+      const ts = now();
+      await db.shifts.add({
+        shiftId: `${state.s.deviceId}-SH-${String(seq).padStart(4, '0')}`, cashierId: state.user.id, cashierName: state.user.name,
+        openedAt: ts, closedAt: null, startingFloat: parseMoney(new FormData(e.target).get('float')), status: 'open', synced: 0, updatedAt: ts
+      });
+      toast('شفت باز شد', 'ok');
+      refreshBadge();
+      go('register');
+    };
+    $('#lastZ')?.addEventListener('click', () => showShiftResult(recent[0]));
+    return;
+  }
+  const moves = await db.movements.where('shiftId').equals(shift.shiftId).toArray();
+  const label = { payout: 'مصرف / پرداخت', drop: 'برداشت به گاوصندوق', payin: 'افزودن پول' };
+  $('#main').innerHTML = `<div class="stack">
+    <div class="card"><h2>شفت جاری <span class="ltr">${esc(shift.shiftId)}</span></h2>
+      <p>باز شده توسط <b>${esc(shift.cashierName)}</b> — ${esc(dariDate(shift.openedAt))}</p>
+      ${isAdmin() ? `<p>پول آغاز شفت: <b>${m(shift.startingFloat)}</b></p>` : ''}
+      <div class="row">
+        <button class="btn" data-move="drop">⬆ برداشت به گاوصندوق</button>
+        <button class="btn" data-move="payout">💸 مصرف / پرداخت</button>
+        <button class="btn" data-move="payin">⬇ افزودن پول</button>
+        <span class="spacer"></span>
+        <button class="btn danger big" id="closeShift">بستن شفت (شمارش پول)</button>
+      </div></div>
+    <div class="card"><h3>حرکت پول در این شفت</h3>
+      ${moves.length ? `<table><thead><tr><th>نوع</th><th>مبلغ</th><th>یادداشت</th><th>کاربر</th><th>زمان</th></tr></thead><tbody>
+      ${moves.map((x) => `<tr><td>${label[x.type]}</td><td>${m(x.amount)}</td><td>${esc(x.note)}</td><td>${esc(x.userName)}</td><td>${esc(dariDate(x.timestamp))}</td></tr>`).join('')}
+      </tbody></table>` : '<p class="muted">هنوز ثبت نشده</p>'}</div></div>`;
+  $$('[data-move]').forEach((b) => b.onclick = () => addMovement(shift, b.dataset.move, label[b.dataset.move]));
+  $('#closeShift').onclick = () => blindClose(shift);
+}
+
+async function addMovement(shift, type, label) {
+  let approver = state.user;
+  if (type !== 'drop') { approver = await requireAdmin(`${label} به تأیید مدیر نیاز دارد`); if (!approver) return; }
+  const v = await formBox(label, [{ name: 'amount', label: 'مبلغ (افغانی)', inputmode: 'decimal', required: true }, { name: 'note', label: 'یادداشت / دلیل' }]);
+  if (!v) return;
+  const amount = parseMoney(v.amount);
+  if (!amount) return toast('مبلغ درست نیست', 'err');
+  const ts = now();
+  await db.movements.add({ id: randomId(), shiftId: shift.shiftId, type, amount, note: v.note || '', userName: state.user.name,
+    approvedBy: approver.name, timestamp: ts, updatedAt: ts, synced: 0 });
+  refreshBadge();
+  renderShift();
+}
+
+function blindClose(shift) {
+  modal(`<h2>شمارش پول ختم شفت</h2>
+    <p class="muted">همه پول‌ها و سکه‌های داخل دخل را بشمارید — پول آغاز شفت را هم حساب کنید.</p>
+    <div class="denoms">${AFN_DENOMS.map((d) => `<label>${toDariDigits(d)} ؋ ×<input data-den="${d}" inputmode="numeric" placeholder="۰"></label>`).join('')}</div>
+    <p>مجموع شمارش شده:</p><div class="counted num" id="counted">${m(0)}</div>
+    <div class="actions"><button class="btn danger grow" data-submit>قفل و ثبت شمارش</button><button class="btn" data-no>لغو</button></div>`, {
+    dismiss: false,
+    onMount: (box, close) => {
+      const read = () => Object.fromEntries($$('[data-den]', box).map((i) => [i.dataset.den, parseIntSafe(i.value)]));
+      box.addEventListener('input', () => { $('#counted', box).textContent = m(countDenoms(read())); });
+      box.querySelector('[data-no]').onclick = close;
+      box.querySelector('[data-submit]').onclick = async () => {
+        const denoms = read();
+        const counted = countDenoms(denoms);
+        if (!(await confirmBox(`مجموع شمارش ${m(counted)} ثبت شود؟ بعد از ثبت قابل تغییر نیست.`))) return;
+        close();
+        const result = await finalizeShift(shift, denoms, counted);
+        beep('done');
+        if (isAdmin()) return showShiftResult(result);
+        modal(`<h2>شفت بسته شد</h2><p>شمارش شما (${m(counted)}) ثبت شد. نتیجه را مدیر می‌بیند.</p>
+          <div class="actions"><button class="btn primary" data-admin>نمایش نتیجه (رمز مدیر)</button><button class="btn" data-ok>خوب</button></div>`, {
+          onMount: (b, c) => {
+            b.querySelector('[data-ok]').onclick = () => { c(); go('shift'); };
+            b.querySelector('[data-admin]').onclick = async () => { if (await askPin('رمز مدیر', { role: 'admin' })) { c(); showShiftResult(result); } };
+          }
+        });
+        go('shift');
+      };
+    }
+  });
+}
+
+async function finalizeShift(shift, denoms, counted) {
+  const sales = await db.sales.where('shiftId').equals(shift.shiftId).toArray();
+  const movements = await db.movements.where('shiftId').equals(shift.shiftId).toArray();
+  const exp = shiftExpected({ startingFloat: shift.startingFloat, sales, movements });
+  const variance = counted - exp.expected;
+  const ts = now();
+  const rec = {
+    ...shift, status: 'closed', closedAt: ts, closedBy: state.user.name, denoms, countedCash: counted, expectedCash: exp.expected, variance,
+    varianceStatus: varianceStatus(variance), netCash: exp.netCash, payouts: exp.payouts, drops: exp.drops, payins: exp.payins,
+    grossSales: sales.reduce((a, s) => a + s.total, 0), voidTotal: sales.filter((s) => s.voided).reduce((a, s) => a + s.total, 0),
+    txCount: sales.filter((s) => !s.voided).length, updatedAt: ts, synced: 0
+  };
+  await db.shifts.put(rec);
+  refreshBadge();
+  if (navigator.onLine) syncNow({ pull: false }).then(refreshBadge);
+  return rec;
+}
+
+function showShiftResult(r) {
+  const word = { balanced: 'برابر ✔', short: 'کمبود', over: 'اضافه' }[r.varianceStatus] || '';
+  modal(`<h2>نتیجه شفت <span class="ltr">${esc(r.shiftId)}</span></h2>
+    <table><tbody>
+      <tr><td>پول آغاز شفت</td><td>${m(r.startingFloat)}</td></tr>
+      <tr><td>فروش خالص نقدی</td><td>${m(r.netCash)}</td></tr>
+      <tr><td>افزودن پول / مصارف / برداشت</td><td>${m(r.payins)} / ${m(r.payouts)} / ${m(r.drops)}</td></tr>
+      <tr><td><b>متوقع در دخل</b></td><td><b>${m(r.expectedCash)}</b></td></tr>
+      <tr><td><b>شمارش شده</b></td><td><b>${m(r.countedCash)}</b></td></tr>
+    </tbody></table>
+    <div class="variance ${esc(r.varianceStatus)}" style="margin-top:12px">${r.variance > 0 ? '+' : ''}${m(r.variance)} — ${word}</div>
+    <div class="actions"><button class="btn primary" data-print>🖨 چاپ گزارش Z</button>
+      ${bluetoothSupported() ? '<button class="btn" data-bt>📶 بلوتوث</button>' : ''}<button class="btn" data-close>بستن</button></div>`, {
+    onMount: (box, close) => {
+      box.querySelector('[data-close]').onclick = close;
+      box.querySelector('[data-print]').onclick = () => printHtml(zReportDoc(r, state.s), state.s.paperWidth);
+      box.querySelector('[data-bt]')?.addEventListener('click', () => btPrint(zReportDoc(r, state.s)));
+    }
+  });
+}
+
+// ====================================================================== receive stock
+async function renderReceive() {
+  state.batch = state.batch || (await getSetting2('currentBatch'));
+  const b = state.batch;
+  if (!b) {
+    $('#main').innerHTML = `<div class="center-screen"><form class="card setup stack" id="batchForm">
+      <h2>📦 دریافت محموله جدید</h2>
+      <label class="field">نام عرضه‌کننده (تأمین‌کننده)<input name="supplier" required autofocus></label>
+      <label class="field">شماره فاکتور<input name="invoiceNo"></label>
+      <button class="btn primary big" type="submit">شروع دریافت</button></form></div>`;
+    $('#batchForm').onsubmit = async (e) => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(e.target));
+      state.batch = { batchId: 'B-' + Date.now().toString(36).toUpperCase(), supplier: f.supplier.trim(), invoiceNo: f.invoiceNo.trim(), startedAt: now() };
+      await setSetting('currentBatch', state.batch);
+      renderReceive();
+    };
+    return;
+  }
+  const lines = await db.receivings.where('batchId').equals(b.batchId).toArray();
+  const totalCost = lines.reduce((a, l) => a + l.qty * l.cost, 0);
+  $('#main').innerHTML = `<div class="stack">
+    <div class="card"><div class="row"><h2 style="margin:0">📦 ${esc(b.supplier)}</h2><span class="muted">فاکتور: ${esc(b.invoiceNo || '—')}</span>
+      <span class="spacer"></span><button class="btn primary" id="endBatch">ختم محموله</button></div>
+      <div class="scanbar" style="margin-top:12px"><input id="recvScan" data-scan placeholder="بارکد جنس را اسکن کنید" autocomplete="off" autofocus>
+      <button class="btn" id="camBtn">📷 کمره</button><button class="btn" id="noCode" title="جنس بدون بارکد">بدون بارکد</button></div>
+      <div id="camBox" class="cam hidden"></div></div>
+    <div class="card hidden" id="itemCard"></div>
+    <div class="card"><div class="row"><h3 style="margin:0">اجناس این محموله</h3><span class="spacer"></span>
+      <b>مجموع فاکتور: ${m(totalCost)}</b></div>
+      ${lines.length ? `<div class="table-wrap"><table><thead><tr><th>جنس</th><th>تعداد</th><th>قیمت خرید</th><th>قیمت فروش</th><th>مجموع</th></tr></thead><tbody>
+      ${lines.map((l) => `<tr><td>${esc(l.name)}</td><td>${toDariDigits(l.qty)}</td><td>${m(l.cost)}</td><td>${m(l.price)}</td><td>${m(l.qty * l.cost)}</td></tr>`).join('')}
+      </tbody></table></div>` : '<p class="muted">هنوز جنسی اضافه نشده</p>'}</div></div>`;
+  bindScanInput($('#recvScan'), receiveCode);
+  $('#camBtn').onclick = (e) => toggleCamera('camBox', receiveCode, e.currentTarget);
+  $('#noCode').onclick = async () => receiveCode(internalBarcode(await nextSeq('internalSeq')));
+  $('#endBatch').onclick = async () => {
+    if (!(await confirmBox(`محموله «${b.supplier}» با ${toDariDigits(lines.length)} قلم و مجموع ${m(totalCost)} ختم شود؟`))) return;
+    state.batch = null;
+    await setSetting('currentBatch', null);
+    toast('محموله ثبت شد', 'ok');
+    if (navigator.onLine) syncNow({ pull: false }).then(refreshBadge);
+    renderReceive();
+  };
+}
+async function getSetting2(k) { return (await getSettings())[k]; }
+
+async function receiveCode(code) {
+  if (!state.batch) return;
+  if (!eanValid(code)) { beep('err'); return toast('بارکد درست خوانده نشد، دوباره اسکن کنید', 'err'); }
+  const p = await db.products.get(code);
+  beep(p ? 'ok' : 'new');
+  const card = $('#itemCard');
+  card.classList.remove('hidden');
+  card.innerHTML = `<form class="stack" id="itemForm">
+    <div class="row"><b>بارکد:</b><span class="ltr">${esc(code)}</span>${p ? `<span class="muted">موجودی فعلی: ${toDariDigits(p.stock || 0)}</span>` : '<span class="new-flag">جنس جدید! نام و قیمت را وارد کنید</span>'}</div>
+    <label class="field">نام جنس<input name="name" required value="${esc(p?.name || '')}" ${p ? '' : 'autofocus'}></label>
+    <div class="grid2">
+      <label class="field">قیمت خرید (فی دانه)<input name="cost" inputmode="decimal" required value="${p ? esc(formatNumber(p.cost || 0)) : ''}" ${p ? 'autofocus' : ''}></label>
+      <label class="field">قیمت فروش<input name="price" inputmode="decimal" required value="${p ? esc(formatNumber(p.price)) : ''}"></label>
+    </div>
+    <div class="row">مفاد: <span class="margin-pill" id="margin">—</span></div>
+    <label class="field">تعداد دریافتی<input name="qty" inputmode="numeric" required value="${toDariDigits(1)}"></label>
+    <div class="qty-add">${[1, 6, 12, 24, 48].map((n) => `<button type="button" class="btn" data-add="${n}">+${toDariDigits(n)}${n >= 12 ? ' (کارتن)' : ''}</button>`).join('')}
+      <button type="button" class="btn" data-add="0">صفر</button></div>
+    <button class="btn primary big" type="submit">ذخیره و افزودن به گدام</button></form>`;
+  const form = $('#itemForm');
+  const updMargin = () => {
+    const c = parseMoney(form.cost.value), r = parseMoney(form.price.value);
+    const mp = marginPct(c, r);
+    $('#margin').textContent = r ? toDariDigits(mp) + '٪' : '—';
+    $('#margin').classList.toggle('bad', r > 0 && mp < 0);
+  };
+  form.addEventListener('input', updMargin);
+  form.qty.addEventListener('input', () => { form.qty.dataset.touched = '1'; });
+  updMargin();
+  card.querySelector('.qty-add').onclick = (e) => {
+    const n = e.target.closest('[data-add]')?.dataset.add;
+    if (n === undefined) return;
+    form.qty.value = toDariDigits(n === '0' ? 0 : parseIntSafe(form.qty.value) + +n - (form.qty.dataset.touched ? 0 : 1));
+    form.qty.dataset.touched = '1';
+  };
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    const qty = parseIntSafe(form.qty.value), cost = parseMoney(form.cost.value), price = parseMoney(form.price.value);
+    if (qty <= 0) return toast('تعداد باید بیشتر از صفر باشد', 'err');
+    if (!price) return toast('قیمت فروش را وارد کنید', 'err');
+    const ts = now();
+    await db.transaction('rw', db.products, db.receivings, async () => {
+      const cur = await db.products.get(code);
+      await db.products.put({ barcode: code, name: form.name.value.trim(), price, cost, stock: (cur?.stock || 0) + qty, quick: cur?.quick || 0, updatedAt: ts, synced: 0 });
+      await db.receivings.add({ id: randomId(), batchId: state.batch.batchId, supplier: state.batch.supplier, invoiceNo: state.batch.invoiceNo,
+        barcode: code, name: form.name.value.trim(), qty, cost, price, total: qty * cost, userName: state.user.name, timestamp: ts, updatedAt: ts, synced: 0,
+        priceChanged: cur ? cur.price !== price : false });
+    });
+    beep('done');
+    toast(`${toDariDigits(qty)} عدد «${form.name.value.trim()}» به گدام اضافه شد`, 'ok');
+    refreshBadge();
+    await renderReceive();
+  };
+  card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// ====================================================================== products
+async function renderProducts() {
+  $('#main').innerHTML = `<div class="card stack">
+    <div class="row"><h2 style="margin:0">🏷️ اجناس</h2><span class="spacer"></span>
+      <button class="btn primary" id="newProd">+ جنس جدید</button>
+      <button class="btn" id="expCsv">صادرات CSV</button><button class="btn" id="impCsv">واردات CSV</button>
+      <button class="btn" id="pullSheet">دریافت قیمت‌ها از شیت</button></div>
+    <input id="prodSearch" data-scan placeholder="جستجو با نام یا بارکد" autocomplete="off">
+    <div class="table-wrap"><table><thead><tr><th>نام</th><th>بارکد</th><th>قیمت فروش</th><th>قیمت خرید</th><th>مفاد</th><th>موجودی</th><th>⭐</th><th></th></tr></thead>
+    <tbody id="prodRows"></tbody></table></div></div>`;
+  const draw = async (q = '') => {
+    const nq = normalizeBarcode(q);
+    const all = await db.products.orderBy('name').toArray();
+    const list = q ? all.filter((p) => p.name.includes(q) || p.barcode.includes(nq)) : all;
+    $('#prodRows').innerHTML = list.map((p) => `<tr class="${(p.stock || 0) <= state.s.lowStock ? 'low' : ''}">
+      <td>${esc(p.name)}</td><td><span class="ltr small">${esc(p.barcode)}</span></td><td>${m(p.price)}</td><td>${m(p.cost || 0)}</td>
+      <td>${toDariDigits(marginPct(p.cost || 0, p.price))}٪</td><td>${toDariDigits(p.stock || 0)}</td><td>${p.quick ? '⭐' : ''}</td>
+      <td><button class="btn small" data-edit="${esc(p.barcode)}">ویرایش</button></td></tr>`).join('')
+      || '<tr><td colspan="8" class="empty">جنسی نیست</td></tr>';
+  };
+  $('#prodSearch').oninput = (e) => draw(e.target.value.trim());
+  $('#prodRows').onclick = async (e) => { const bc = e.target.closest('[data-edit]')?.dataset.edit; if (bc) editProduct(await db.products.get(bc), () => draw($('#prodSearch').value.trim())); };
+  $('#newProd').onclick = () => editProduct({}, () => draw());
+  $('#expCsv').onclick = async () => {
+    const rows = [['barcode', 'name', 'price', 'cost', 'stock', 'quick']];
+    for (const p of await db.products.toArray()) rows.push([p.barcode, p.name, p.price / 100, (p.cost || 0) / 100, p.stock || 0, p.quick ? 1 : 0]);
+    download(`products-${new Date().toISOString().slice(0, 10)}.csv`, '﻿' + toCsv(rows), 'text/csv;charset=utf-8');
+  };
+  $('#impCsv').onclick = async () => {
+    const f = await pickFile('.csv,text/csv');
+    if (!f) return;
+    const rows = parseCsv(await f.text());
+    const head = rows.shift()?.map((h) => h.trim().toLowerCase()) || [];
+    const ix = (k) => head.indexOf(k);
+    if (ix('barcode') < 0 || ix('name') < 0 || ix('price') < 0) return toast('ستون‌های barcode, name, price لازم است', 'err');
+    let n = 0; const ts = now();
+    await db.transaction('rw', db.products, async () => {
+      for (const r of rows) {
+        const bc = normalizeBarcode(r[ix('barcode')] || '');
+        if (!bc) continue;
+        const cur = await db.products.get(bc);
+        await db.products.put({ barcode: bc, name: (r[ix('name')] || '').trim(), price: parseMoney(r[ix('price')]),
+          cost: ix('cost') >= 0 ? parseMoney(r[ix('cost')]) : cur?.cost || 0,
+          stock: ix('stock') >= 0 ? parseIntSafe(r[ix('stock')]) : cur?.stock || 0,
+          quick: ix('quick') >= 0 ? (parseIntSafe(r[ix('quick')]) ? 1 : 0) : cur?.quick || 0, updatedAt: ts, synced: 0 });
+        n++;
+      }
+    });
+    toast(`${toDariDigits(n)} جنس وارد شد`, 'ok');
+    draw();
+  };
+  $('#pullSheet').onclick = async () => {
+    try { const n = await pullProducts(); toast(`${toDariDigits(n)} جنس از گوگل شیت به‌روز شد`, 'ok'); draw(); }
+    catch (err) { toast(navigator.onLine ? err.message : 'برای این کار انترنت لازم است', 'err'); }
+  };
+  draw();
+}
+
+function editProduct(p, after) {
+  const isNew = !p.name;
+  modal(`<h2>${isNew ? 'جنس جدید' : 'ویرایش جنس'}</h2><form class="stack" id="pf">
+    <label class="field">بارکد<div class="row"><input name="barcode" class="grow ltr" required value="${esc(p.barcode || '')}" ${isNew ? '' : 'readonly'}>
+      ${isNew ? '<button type="button" class="btn small" id="genCode">تولید کد داخلی</button>' : ''}</div></label>
+    <label class="field">نام<input name="name" required value="${esc(p.name || '')}"></label>
+    <div class="grid2"><label class="field">قیمت فروش<input name="price" inputmode="decimal" required value="${p.price != null ? esc(formatNumber(p.price)) : ''}"></label>
+    <label class="field">قیمت خرید<input name="cost" inputmode="decimal" value="${p.cost != null ? esc(formatNumber(p.cost)) : ''}"></label></div>
+    <label class="field">موجودی<input name="stock" inputmode="numeric" value="${toDariDigits(p.stock || 0)}"></label>
+    <label class="check"><input type="checkbox" name="quick" ${p.quick ? 'checked' : ''}> دکمه سریع در صفحه فروش (برای نان، میوه و ...)</label>
+    <div class="actions"><button class="btn primary" type="submit">ذخیره</button>
+      ${isNew ? '' : '<button class="btn" type="button" data-label>🏷 چاپ لیبل QR</button><button class="btn danger" type="button" data-del>حذف</button>'}
+      <button class="btn" type="button" data-no>لغو</button></div></form>`, {
+    dismiss: false,
+    onMount: (box, close) => {
+      const f = box.querySelector('#pf');
+      box.querySelector('[data-no]').onclick = close;
+      box.querySelector('#genCode')?.addEventListener('click', async () => { f.barcode.value = internalBarcode(await nextSeq('internalSeq')); });
+      box.querySelector('[data-label]')?.addEventListener('click', () => printHtml(labelDoc(p), state.s.paperWidth));
+      box.querySelector('[data-del]')?.addEventListener('click', async () => {
+        if (!(await confirmBox(`«${p.name}» از لیست اجناس حذف شود؟ (فروش‌های قبلی باقی می‌ماند)`, { danger: true, okText: 'حذف' }))) return;
+        await db.products.delete(p.barcode);
+        close(); after?.();
+      });
+      f.onsubmit = async (e) => {
+        e.preventDefault();
+        const bc = normalizeBarcode(f.barcode.value);
+        if (isNew && (await db.products.get(bc))) return toast('این بارکد قبلاً ثبت شده است', 'err');
+        await db.products.put({ barcode: bc, name: f.name.value.trim(), price: parseMoney(f.price.value), cost: parseMoney(f.cost.value),
+          stock: parseIntSafe(f.stock.value), quick: f.quick.checked ? 1 : 0, updatedAt: now(), synced: 0 });
+        close(); toast('ذخیره شد', 'ok'); refreshBadge(); after?.();
+      };
+    }
+  });
+}
+
+// ====================================================================== reports
+async function renderReports(dateStr) {
+  const day = dateStr || new Date().toLocaleDateString('en-CA');
+  const start = new Date(day + 'T00:00:00'), end = new Date(start.getTime() + 86400000);
+  const sales = await db.sales.where('timestamp').between(start.toISOString(), end.toISOString()).reverse().toArray();
+  const good = sales.filter((s) => !s.voided);
+  const net = good.reduce((a, s) => a + s.total, 0);
+  const cost = good.reduce((a, s) => a + s.items.reduce((b, l) => b + (l.cost || 0) * l.qty, 0), 0);
+  const voids = sales.filter((s) => s.voided);
+  const top = new Map();
+  for (const s of good) for (const l of s.items) { const t = top.get(l.barcode) || { name: l.name, qty: 0, total: 0 }; t.qty += l.qty; t.total += l.qty * l.price; top.set(l.barcode, t); }
+  const topList = [...top.values()].sort((a, b) => b.total - a.total).slice(0, 10);
+  const shifts = await db.shifts.orderBy('openedAt').reverse().limit(15).toArray();
+  const low = (await db.products.toArray()).filter((p) => (p.stock || 0) <= state.s.lowStock).slice(0, 30);
+  const s = await getSettings();
+  $('#main').innerHTML = `<div class="stack">
+    <div class="card row"><h2 style="margin:0">📊 گزارش</h2>
+      <input type="date" id="day" value="${day}" style="max-width:200px"><span class="muted">${esc(dariDate(start, { time: false }))}</span>
+      <span class="spacer"></span><button class="btn" id="scanRcpt">📷 اسکن QR رسید</button><button class="btn" id="expSales">صادرات فروش CSV</button></div>
+    <div id="camBox" class="cam hidden"></div>
+    <div class="grid2">
+      <div class="stat"><div class="k">فروش خالص</div><div class="v">${m(net)}</div></div>
+      <div class="stat"><div class="k">تعداد رسید</div><div class="v">${toDariDigits(good.length)}</div></div>
+      <div class="stat"><div class="k">مفاد ناخالص</div><div class="v">${m(net - cost)}</div><div class="small muted">${toDariDigits(net ? Math.round(((net - cost) / net) * 100) : 0)}٪ از فروش</div></div>
+      <div class="stat"><div class="k">باطل شده</div><div class="v">${toDariDigits(voids.length)} · ${m(voids.reduce((a, x) => a + x.total, 0))}</div></div>
+    </div>
+    <div class="grid2">
+      <div class="card"><h3>پرفروش‌ترین اجناس</h3>${topList.length ? `<table><tbody>${topList.map((t) => `<tr><td>${esc(t.name)}</td><td>${toDariDigits(t.qty)}</td><td>${m(t.total)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">—</p>'}</div>
+      <div class="card"><h3>موجودی کم (≤ ${toDariDigits(s.lowStock)})</h3>${low.length ? `<table><tbody>${low.map((p) => `<tr><td>${esc(p.name)}</td><td>${toDariDigits(p.stock || 0)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">همه خوب است</p>'}</div>
+    </div>
+    <div class="card"><h3>رسیدها</h3><div class="table-wrap"><table><thead><tr><th>رسید</th><th>زمان</th><th>صندوقدار</th><th>مجموع</th><th>دریافتی</th><th>باقی</th><th>همگام</th></tr></thead><tbody id="rcptRows">
+      ${sales.map((x) => `<tr class="${x.voided ? 'voided' : ''}" data-r="${esc(x.receiptId)}" style="cursor:pointer"><td><span class="ltr small">${esc(x.receiptId)}</span></td><td>${esc(dariDate(x.timestamp))}</td><td>${esc(x.cashierName)}</td>
+        <td>${m(x.total)}</td><td>${m(x.cashReceived)}</td><td>${m(x.changeGiven)}</td><td>${x.synced ? '✔' : '⏳'}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">فروشی در این روز نیست</td></tr>'}
+    </tbody></table></div></div>
+    <div class="card"><h3>شفت‌ها</h3><div class="table-wrap"><table><thead><tr><th>شفت</th><th>صندوقدار</th><th>باز</th><th>بسته</th><th>متوقع</th><th>شمارش</th><th>تفاوت</th></tr></thead><tbody id="shiftRows">
+      ${shifts.map((x) => `<tr data-sh="${esc(x.shiftId)}" style="cursor:pointer"><td><span class="ltr small">${esc(x.shiftId)}</span></td><td>${esc(x.cashierName)}</td><td>${esc(dariDate(x.openedAt))}</td>
+        <td>${x.closedAt ? esc(dariDate(x.closedAt)) : '<b>باز</b>'}</td><td>${x.closedAt ? m(x.expectedCash) : '—'}</td><td>${x.closedAt ? m(x.countedCash) : '—'}</td>
+        <td>${x.closedAt ? `<span class="variance ${esc(x.varianceStatus)}" style="font-size:1rem;padding:2px 8px">${m(x.variance)}</span>` : '—'}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">—</td></tr>'}
+    </tbody></table></div></div></div>`;
+  $('#day').onchange = (e) => renderReports(e.target.value);
+  $('#rcptRows').onclick = (e) => { const r = e.target.closest('[data-r]')?.dataset.r; if (r) showReceipt(r); };
+  $('#shiftRows').onclick = async (e) => { const id = e.target.closest('[data-sh]')?.dataset.sh; if (!id) return; const sh = await db.shifts.get(id); if (sh.closedAt) showShiftResult(sh); };
+  $('#scanRcpt').onclick = (e) => toggleCamera('camBox', reportsCode, e.currentTarget);
+  $('#expSales').onclick = () => {
+    const rows = [['receiptId', 'timestamp', 'cashier', 'barcode', 'item', 'qty', 'price', 'lineTotal', 'receiptTotal', 'cashReceived', 'change', 'voided']];
+    for (const x of sales) for (const l of x.items) rows.push([x.receiptId, x.timestamp, x.cashierName, l.barcode, l.name, l.qty, l.price / 100, (l.price * l.qty) / 100, x.total / 100, x.cashReceived / 100, x.changeGiven / 100, x.voided ? 1 : 0]);
+    download(`sales-${day}.csv`, '﻿' + toCsv(rows), 'text/csv;charset=utf-8');
+  };
+}
+
+function reportsCode(code) {
+  const r = parseReceiptQr(code);
+  if (r) { stopCamera(); $('#camBox')?.classList.add('hidden'); showReceipt(r.receiptId); }
+  else toast('این QR رسید نیست', 'err');
+}
+
+// ====================================================================== settings
+async function renderSettings() {
+  const s = await getSettings();
+  state.s = s;
+  const users = await db.users.toArray();
+  const persisted = navigator.storage?.persisted ? await navigator.storage.persisted() : false;
+  $('#main').innerHTML = `<div class="stack">
+    <form class="card stack" id="sf"><h2>⚙️ تنظیمات فروشگاه</h2>
+      <div class="grid2">
+        <label class="field">نام فروشگاه<input name="storeName" value="${esc(s.storeName)}"></label>
+        <label class="field">آدرس<input name="storeAddress" value="${esc(s.storeAddress)}"></label>
+        <label class="field">تلفن<input name="storePhone" value="${esc(s.storePhone)}" class="ltr"></label>
+        <label class="field">متن پایین رسید<input name="receiptFooter" value="${esc(s.receiptFooter)}"></label>
+        <label class="field">کد دستگاه<input name="deviceId" value="${esc(s.deviceId)}" class="ltr" maxlength="6"></label>
+        <label class="field">عرض کاغذ چاپگر<select name="paperWidth"><option value="80" ${s.paperWidth == 80 ? 'selected' : ''}>۸۰ ملی‌متر</option><option value="58" ${s.paperWidth == 58 ? 'selected' : ''}>۵۸ ملی‌متر</option></select></label>
+        <label class="field">حد موجودی کم<input name="lowStock" inputmode="numeric" value="${toDariDigits(s.lowStock)}"></label>
+      </div>
+      <label class="check"><input type="checkbox" name="autoPrint" ${s.autoPrint ? 'checked' : ''}> چاپ خودکار رسید بعد از هر فروش</label>
+      <h3>☁️ گوگل شیت (دفتر پشتیبان — فقط این بخش انترنت لازم دارد)</h3>
+      <label class="field">آدرس Web App (Apps Script)<input name="webhookUrl" value="${esc(s.webhookUrl)}" class="ltr" placeholder="https://script.google.com/macros/s/.../exec"></label>
+      <label class="field">کلید امنیتی (همان SYNC_TOKEN در Apps Script)<input name="syncToken" value="${esc(s.syncToken)}" class="ltr" type="password" autocomplete="off"></label>
+      <div class="row"><button class="btn primary" type="submit">ذخیره تنظیمات</button><button class="btn" type="button" id="syncBtn">همگام‌سازی اکنون</button>
+        <button class="btn" type="button" id="pullUsersBtn">دریافت کاربران از شیت</button></div>
+      <p class="small muted">آخرین همگام‌سازی: ${s.lastSyncAt ? esc(dariDate(s.lastSyncAt)) : 'هرگز'} ${s.lastSyncError ? ' · خطا: ' + esc(s.lastSyncError) : ''}</p>
+    </form>
+    <div class="card stack"><div class="row"><h2 style="margin:0">👥 کاربران</h2><span class="spacer"></span><button class="btn primary" id="addUser">+ کاربر جدید</button></div>
+      <table><thead><tr><th>نام</th><th>نقش</th><th>منبع</th><th>وضعیت</th><th></th></tr></thead><tbody id="userRows">
+      ${users.map((u) => `<tr><td>${esc(u.name)}</td><td>${u.role === 'admin' ? 'مدیر' : 'صندوقدار'}</td><td>${u.source === 'sheet' ? 'گوگل شیت' : 'دستگاه'}</td>
+        <td>${u.active ? 'فعال' : 'غیرفعال'}</td><td>${u.source === 'sheet' ? '<span class="small muted">در شیت تغییر دهید</span>' :
+        `<button class="btn small" data-pin="${esc(u.id)}">تغییر رمز</button> <button class="btn small" data-toggle="${esc(u.id)}">${u.active ? 'غیرفعال' : 'فعال'}</button>`}</td></tr>`).join('')}
+      </tbody></table></div>
+    <div class="card stack"><h2>🖨 چاپگر</h2>
+      <p class="muted small">چاپگر USB/سیستمی: دکمه «چاپ» از پنجره چاپ مرورگر استفاده می‌کند. چاپگر بلوتوث: فقط در Chrome (اندروید/کمپیوتر).</p>
+      <div class="row"><button class="btn" id="testPrint">چاپ آزمایشی</button>
+      ${bluetoothSupported() ? `<button class="btn" id="btConnect">وصل کردن چاپگر بلوتوث ${bluetoothName() ? '(' + esc(bluetoothName()) + ')' : ''}</button><button class="btn" id="btTest">آزمایش بلوتوث</button>` : '<span class="muted small">این مرورگر بلوتوث را پشتیبانی نمی‌کند</span>'}</div></div>
+    <div class="card stack"><h2>💾 پشتیبان</h2>
+      <p class="muted small">ذخیره دائمی دستگاه: ${persisted ? '✔ فعال' : '✖ فعال نیست — اپ را نصب کنید (Add to Home Screen)'} · پشتیبان را هر هفته در فلش یا جای امن نگه دارید.</p>
+      <div class="row"><button class="btn" id="backup">دانلود پشتیبان کامل (JSON)</button><button class="btn" id="restore">بازیابی از پشتیبان</button></div></div>
+  </div>`;
+  $('#sf').onsubmit = async (e) => {
+    e.preventDefault();
+    const f = new FormData(e.target);
+    for (const k of ['storeName', 'storeAddress', 'storePhone', 'receiptFooter', 'webhookUrl', 'syncToken']) await setSetting(k, String(f.get(k) || '').trim());
+    await setSetting('deviceId', String(f.get('deviceId')).toUpperCase().replace(/[^A-Z0-9]/g, '') || 'T1');
+    await setSetting('paperWidth', parseInt(f.get('paperWidth'), 10));
+    await setSetting('lowStock', parseIntSafe(f.get('lowStock')));
+    await setSetting('autoPrint', !!f.get('autoPrint'));
+    state.s = await getSettings();
+    $('#storeTitle').textContent = state.s.storeName;
+    toast('ذخیره شد', 'ok');
+    refreshBadge();
+  };
+  $('#syncBtn').onclick = () => $('#syncBadge').click();
+  $('#pullUsersBtn').onclick = async () => {
+    if (!navigator.onLine) return toast('برای این کار انترنت لازم است', 'err');
+    try { const n = await pullUsers(await getSettings()); toast(`${toDariDigits(n)} کاربر از شیت دریافت شد`, 'ok'); renderSettings(); }
+    catch (err) { toast(err.message, 'err'); }
+  };
+  $('#addUser').onclick = async () => {
+    const v = await formBox('کاربر جدید', [{ name: 'name', label: 'نام', required: true },
+      { name: 'role', label: 'نقش', value: 'cashier', options: [['cashier', 'صندوقدار'], ['admin', 'مدیر']] },
+      { name: 'pin', label: 'رمز (۴ تا ۶ رقم)', inputmode: 'numeric', type: 'password', required: true }]);
+    if (!v) return;
+    const pin = toLatin(v.pin);
+    if (!/^\d{4,6}$/.test(pin)) return toast('رمز باید ۴ تا ۶ رقم باشد', 'err');
+    if (await pinInUse(pin)) return toast('این رمز را کاربر دیگری دارد', 'err');
+    await createUser({ name: v.name.trim(), role: v.role, pin });
+    toast('کاربر اضافه شد', 'ok'); renderSettings();
+  };
+  $('#userRows').onclick = async (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    const u = await db.users.get(b.dataset.pin || b.dataset.toggle);
+    if (b.dataset.pin) {
+      const v = await formBox(`رمز جدید برای ${u.name}`, [{ name: 'pin', label: 'رمز (۴ تا ۶ رقم)', inputmode: 'numeric', type: 'password', required: true }]);
+      if (!v) return;
+      const pin = toLatin(v.pin);
+      if (!/^\d{4,6}$/.test(pin)) return toast('رمز باید ۴ تا ۶ رقم باشد', 'err');
+      if (await pinInUse(pin, u.id)) return toast('این رمز را کاربر دیگری دارد', 'err');
+      await setUserPin(u, pin); toast('رمز تغییر کرد', 'ok');
+    } else {
+      if (u.active && u.role === 'admin') {
+        const admins = (await db.users.toArray()).filter((x) => x.active && x.role === 'admin');
+        if (admins.length <= 1) return toast('حداقل یک مدیر فعال لازم است', 'err');
+      }
+      await db.users.update(u.id, { active: !u.active }); renderSettings();
+    }
+  };
+  const sample = { receiptId: `${s.deviceId}-TEST-0001`, timestamp: now(), cashierName: state.user.name, items: [{ name: 'جنس آزمایشی', qty: 2, price: 2500 }], total: 5000, cashReceived: 10000, changeGiven: 5000 };
+  $('#testPrint').onclick = () => printHtml(receiptDoc(sample, state.s), state.s.paperWidth);
+  $('#btConnect')?.addEventListener('click', async () => { try { toast('وصل شد: ' + (await connectBluetooth()), 'ok'); renderSettings(); } catch (err) { toast(err.message, 'err'); } });
+  $('#btTest')?.addEventListener('click', () => btPrint(receiptDoc(sample, state.s)));
+  $('#backup').onclick = async () => download(`dari-pos-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(await exportBackup()), 'application/json');
+  $('#restore').onclick = async () => {
+    const f = await pickFile('.json,application/json');
+    if (!f) return;
+    if (!(await confirmBox('همه اطلاعات فعلی این دستگاه با فایل پشتیبان جایگزین شود؟', { danger: true, okText: 'جایگزین شود' }))) return;
+    try { await importBackup(JSON.parse(await f.text())); toast('بازیابی شد', 'ok'); state.s = await getSettings(); renderLock(); }
+    catch (err) { toast(err.message, 'err'); }
+  };
+}
+
+boot();
