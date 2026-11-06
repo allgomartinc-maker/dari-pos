@@ -289,3 +289,9 @@ html { touch-action: manipulation; }
 .scanbar .btn { white-space: nowrap; flex: none; }
 .modal .nf .actions .grow { flex: 2; white-space: nowrap; }
 .nf .btn.big { font-size: 1.1rem; }
+
+/* native camera scanner */
+.cam { position: relative; }
+.cam video { display: block; width: 100%; height: auto; max-height: 60vh; object-fit: cover; }
+.scan-guide { position: absolute; inset: 25% 5%; border: 2px solid rgba(255,255,255,.85); border-radius: 12px; box-shadow: 0 0 0 999px rgba(0,0,0,.25); pointer-events: none; }
+.scan-guide::after { content: ''; position: absolute; left: 4%; right: 4%; top: 50%; height: 2px; background: #ff3b30; box-shadow: 0 0 6px #ff3b30; }

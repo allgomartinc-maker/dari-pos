@@ -40,34 +40,95 @@ export function initWedge() {
 }
 
 // ---------- camera ----------
-let cam = null;
+// One pipeline for every phone: our own HD video + a crop of the centre strip at full resolution.
+//  - Fast path: the phone's built-in BarcodeDetector (Android Chrome etc.).
+//  - Fallback (e.g. iPhone): the ZXing decoder bundled in html5-qrcode, fed the full-resolution crop.
+// (html5-qrcode's own live loop shrinks the frame to the on-screen box, ~350px on a phone, which
+//  squeezes each bar to ~1px — that is why scanning used to need many seconds or a very close phone.)
+let cam = null;  // { stream, video, stopped, timer }
 let lastCode = '', lastAt = 0;
+const NATIVE_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf', 'qr_code'];
+const VIDEO = { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 }, advanced: [{ focusMode: 'continuous' }] };
+const CROP_W = 0.9, CROP_H = 0.5, MAX_W = 1280; // centre strip at full HD resolution: small/far barcodes need ~2px per bar
+
+function emit(text, onCode) {
+  const code = normalizeBarcode(text);
+  const now = Date.now();
+  // Same code still in view counts once; any dialog open (not-found, weight, add product) pauses the camera.
+  const repeat = code === lastCode && now - lastAt < 1500;
+  lastCode = code; lastAt = now;
+  if (repeat || document.querySelector('.modal-back')) return;
+  onCode(code, 'camera');
+}
+
+async function makeDecoder() {
+  if ('BarcodeDetector' in window && !window.__noNativeScan) {
+    try {
+      const supported = await window.BarcodeDetector.getSupportedFormats();
+      const formats = NATIVE_FORMATS.filter((f) => supported.includes(f));
+      if (formats.includes('ean_13')) {
+        const det = new window.BarcodeDetector({ formats });
+        return async (video) => { const r = await det.detect(video); return r[0]?.rawValue || null; };
+      }
+    } catch { /* fall through to ZXing */ }
+  }
+  const F = window.Html5QrcodeSupportedFormats;
+  const holder = document.createElement('div');
+  holder.id = 'zxingHolder'; holder.hidden = true;
+  document.getElementById('zxingHolder')?.remove();
+  document.body.appendChild(holder);
+  const zx = new window.Html5Qrcode('zxingHolder', {
+    verbose: false,
+    formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.ITF, F.QR_CODE],
+    experimentalFeatures: { useBarCodeDetectorIfSupported: false }
+  });
+  const shim = zx.qrcode;
+  if (!shim || typeof shim.decodeAsync !== 'function') throw new Error('ZXing decoder not available');
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  return async (video) => {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const sw = Math.round(vw * CROP_W), sh = Math.round(vh * CROP_H);
+    const scale = Math.min(1, MAX_W / sw);
+    canvas.width = Math.round(sw * scale); canvas.height = Math.round(sh * scale);
+    ctx.drawImage(video, (vw - sw) / 2, (vh - sh) / 2, sw, sh, 0, 0, canvas.width, canvas.height);
+    try { return (await shim.decodeAsync(canvas)).text; } catch { return null; } // throws when nothing found
+  };
+}
 
 export async function startCamera(elementId, onCode) {
   await stopCamera();
-  const F = window.Html5QrcodeSupportedFormats;
-  cam = new window.Html5Qrcode(elementId, {
-    verbose: false,
-    formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.ITF, F.QR_CODE],
-    experimentalFeatures: { useBarCodeDetectorIfSupported: true }
-  });
-  await cam.start({ facingMode: 'environment' }, { fps: 12, qrbox: (w, h) => ({ width: Math.min(w * 0.9, 360), height: Math.min(h * 0.6, 200) }) },
-    (text) => {
-      const code = normalizeBarcode(text);
-      const now = Date.now();
-      // Same code still in view counts once; any dialog open (not-found, weight, add product) pauses the camera.
-      const repeat = code === lastCode && now - lastAt < 1500;
-      lastCode = code; lastAt = now;
-      if (repeat || document.querySelector('.modal-back')) return;
-      onCode(code, 'camera');
-    }, () => {});
+  const decode = await makeDecoder();
+  const box = document.getElementById(elementId);
+  const stream = await navigator.mediaDevices.getUserMedia({ video: VIDEO, audio: false });
+  const video = document.createElement('video');
+  video.setAttribute('playsinline', '');
+  video.muted = true;
+  video.srcObject = stream;
+  box.innerHTML = '<div class="scan-guide"></div>';
+  box.prepend(video);
+  const c = cam = { stream, video, stopped: false, timer: 0 };
+  await video.play();
+  // Each decode finishes before the next one starts, and the pause after it is as long as the decode took,
+  // so on a slow phone the scanner uses at most about half the CPU and buttons stay responsive.
+  const tick = async () => {
+    if (c.stopped) return;
+    const t0 = performance.now();
+    if (video.readyState >= 2 && video.videoWidth) {
+      try { const text = await decode(video); if (text && !c.stopped) emit(text, onCode); } catch { /* frame not ready */ }
+    }
+    if (!c.stopped) c.timer = setTimeout(tick, Math.max(20, Math.min(400, performance.now() - t0)));
+  };
+  tick();
 }
 
 export async function stopCamera() {
-  if (cam) {
-    try { if (cam.isScanning) await cam.stop(); cam.clear(); } catch { /* ignore */ }
-    cam = null;
-  }
+  if (!cam) return;
+  const c = cam; cam = null;
+  c.stopped = true;
+  clearTimeout(c.timer);
+  c.stream.getTracks().forEach((t) => t.stop());
+  if (c.video.parentElement) c.video.parentElement.innerHTML = '';
 }
 
 export function cameraActive() { return !!cam; }
