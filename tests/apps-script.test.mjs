@@ -121,7 +121,44 @@ test('weighed lines: two weighings of the same item stay two rows; kg counts as 
   assert.equal(sheets.Sales.rows[1][7], 2);       // item count
   assert.equal(sheets.Sales.rows[1][12], 78.75);  // cost 1.25*45 + 0.5*45
   assert.equal(sheets.Inventory.rows[1][9], 'kg');
-  const res = call({ action: 'products', token: props.SYNC_TOKEN });
+  assert.equal(sheets.Inventory.rows[1][4], 48.25); // decimal kg total survives
+  const res = call({ action: 'products', token: props.SYNC_TOKEN, deviceId: 'T2' });
   assert.equal(res.products[0].unit, 'kg');
-  assert.equal(res.products[0].stock, 48.25);
+  assert.equal(res.products[0].stock, 0); // already owned by the till that pushed it — not handed out twice
+});
+
+const prod = (stock) => ({ barcode: '5000', name: 'صابون', price: 3000, cost: 2000, stock, unit: 'pc' });
+
+test('two tills: each keeps its own stock row and Inventory shows the store total (no last-writer-wins)', () => {
+  const { sheets, props, call } = load();
+  const token = props.SYNC_TOKEN;
+  call({ action: 'push', token, deviceId: 'T1', products: [prod(10)] });
+  call({ action: 'push', token, deviceId: 'T2', products: [prod(-3)] }); // T2 sold 3 from T1's delivery
+  assert.equal(sheets.Stock_By_Device.rows.length, 3); // header + T1 + T2
+  assert.equal(sheets.Inventory.rows[1][4], 7);
+  call({ action: 'push', token, deviceId: 'T1', products: [prod(8)] });
+  assert.equal(sheets.Stock_By_Device.rows.length, 3);
+  assert.equal(sheets.Inventory.rows[1][4], 5);
+});
+
+test('starting stock typed into the sheet is handed to the first till that pulls it, and only once', () => {
+  const { sheets, props, call } = load();
+  const token = props.SYNC_TOKEN;
+  sheets.Inventory.rows.push(['6000', 'چای', 50, 40, 24, '', '', '', '', 'pc']);
+  const first = call({ action: 'products', token, deviceId: 'T1' }).products.find((p) => p.barcode === '6000');
+  const second = call({ action: 'products', token, deviceId: 'T2' }).products.find((p) => p.barcode === '6000');
+  assert.equal(first.stock, 24);
+  assert.equal(second.stock, 0);
+  // The total stays 24 after both tills push their own counts.
+  call({ action: 'push', token, deviceId: 'T1', products: [{ barcode: '6000', name: 'چای', price: 5000, cost: 4000, stock: 24 }] });
+  call({ action: 'push', token, deviceId: 'T2', products: [{ barcode: '6000', name: 'چای', price: 5000, cost: 4000, stock: 0 }] });
+  assert.equal(sheets.Inventory.rows.find((r) => r[0] === '6000')[4], 24);
+});
+
+test('older sheets without the Stock_By_Device tab get it created on push', () => {
+  const { sheets, props, call } = load();
+  delete sheets.Stock_By_Device;
+  assert.equal(call({ action: 'push', token: props.SYNC_TOKEN, deviceId: 'T1', products: [prod(4)] }).ok, true);
+  assert.equal(sheets.Stock_By_Device.rows[0][0], 'Key');
+  assert.equal(sheets.Inventory.rows[1][4], 4);
 });

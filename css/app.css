@@ -300,3 +300,12 @@ html { touch-action: manipulation; }
 .cam-btn.on { background: #f5c451; color: #000; }
 .cam.focusing .scan-guide { border-color: #f5c451; }
 .app-ver { margin-top: 10px; text-align: center; }
+.demo-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--warn-bg); color: var(--warn); border: 2px dashed var(--warn); border-radius: var(--radius); padding: 10px 14px; margin-bottom: 12px; font-weight: 700; }
+.demo-banner span { flex: 1; min-width: 180px; }
+.conflict table { margin: 6px 0; }
+.status-warn { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; background: var(--surface); border: 2px solid var(--warn); border-radius: var(--radius); padding: 8px 14px; margin-bottom: 10px; font-weight: 600; }
+.status-warn span { flex: 1; min-width: 180px; }
+.err-text { color: var(--danger); }
+.check-table td:first-child { color: var(--muted); width: 40%; }
+.multi-note { background: var(--surface-2); border-radius: 12px; padding: 8px 12px; }
+.multi-note summary { cursor: pointer; font-weight: 700; }

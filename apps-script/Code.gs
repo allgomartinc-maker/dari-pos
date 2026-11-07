@@ -16,12 +16,14 @@ var TABS = {
   Sales: ['Receipt ID / شماره رسید', 'Time / زمان', 'Shift / شفت', 'Cashier / صندوقدار', 'Total / مجموع', 'Cash Tendered / نقد دریافتی',
     'Change / باقی', 'Items / تعداد', 'Items Summary / اجناس', 'Status / وضعیت', 'Device / دستگاه', 'Synced At / زمان همگام', 'Cost / قیمت خرید', 'Profit / مفاد', 'Voided By / باطل توسط'],
   Sale_Items: ['Receipt ID / شماره رسید', 'Time / زمان', 'Barcode / بارکد', 'Item / جنس', 'Qty / تعداد', 'Price / قیمت', 'Line Total / مجموع', 'Unit Cost / قیمت خرید', 'Price Override / تغییر قیمت', 'Key'],
-  Inventory: ['Barcode / بارکد', 'Name / نام', 'Price / قیمت فروش', 'Cost / قیمت خرید', 'Stock / موجودی', 'Margin % / مفاد', 'Quick / سریع', 'Updated / به‌روز شده', 'Device / دستگاه', 'Unit / واحد (pc / kg)'],
+  Inventory: ['Barcode / بارکد', 'Name / نام', 'Price / قیمت فروش', 'Cost / قیمت خرید', 'Stock (all tills) / موجودی کل', 'Margin % / مفاد', 'Quick / سریع', 'Updated / به‌روز شده', 'Device / دستگاه', 'Unit / واحد (pc / kg)'],
   Purchases: ['ID', 'Time / زمان', 'Batch / محموله', 'Supplier / عرضه‌کننده', 'Invoice / فاکتور', 'Barcode / بارکد', 'Item / جنس', 'Qty / تعداد', 'Unit Cost / قیمت خرید', 'Retail / قیمت فروش', 'Line Cost / مجموع', 'Received By / دریافت کننده', 'Price Changed / تغییر قیمت'],
   Shift_Reconciliation: ['Shift ID / شفت', 'Cashier / صندوقدار', 'Opened / باز شد', 'Closed / بسته شد', 'Start Float / پول آغاز', 'Net Cash Sales / فروش خالص', 'Pay-ins / افزوده',
     'Payouts / مصارف', 'Drops / برداشت', 'Expected / متوقع', 'Counted / شمارش', 'Variance / تفاوت', 'Status / وضعیت', 'Transactions / معاملات', 'Closed By / بسته کننده', 'Denominations / نوت‌ها'],
   Cash_Movements: ['ID', 'Time / زمان', 'Shift / شفت', 'Type / نوع', 'Amount / مبلغ', 'Note / یادداشت', 'User / کاربر', 'Approved By / تأیید'],
-  Users: ['Name / نام', 'Role (admin / cashier)', 'PIN / رمز', 'Active / فعال (TRUE/FALSE)']
+  Users: ['Name / نام', 'Role (admin / cashier)', 'PIN / رمز', 'Active / فعال (TRUE/FALSE)'],
+  // Each till reports only its own stock here; Inventory's stock column is the sum, so tills never overwrite each other.
+  Stock_By_Device: ['Key', 'Barcode / بارکد', 'Device / دستگاه', 'Stock / موجودی این دستگاه', 'Updated / به‌روز شده']
 };
 
 function setup() {
@@ -33,7 +35,7 @@ function setup() {
     sh.setRightToLeft(true);
   });
   // Keep barcodes / PINs as text so leading zeros survive (012000000133, 0123)
-  [['Inventory', 'A:A'], ['Purchases', 'F:F'], ['Sale_Items', 'C:C'], ['Sale_Items', 'J:J'], ['Users', 'C:C']].forEach(function (x) {
+  [['Inventory', 'A:A'], ['Purchases', 'F:F'], ['Sale_Items', 'C:C'], ['Sale_Items', 'J:J'], ['Users', 'C:C'], ['Stock_By_Device', 'A:B']].forEach(function (x) {
     ss.getSheetByName(x[0]).getRange(x[1]).setNumberFormat('@');
   });
   // Variance colours: red short, yellow over, green balanced
@@ -72,7 +74,7 @@ function doPost(e) {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     if (body.action === 'push') return json(push(ss, body));
     if (body.action === 'users') return json({ ok: true, users: users(ss) });
-    if (body.action === 'products') return json({ ok: true, products: products(ss) });
+    if (body.action === 'products') return json({ ok: true, products: products(ss, body.deviceId || '') });
     return json({ ok: false, error: 'unknown action' });
   } catch (err) {
     return json({ ok: false, error: String(err) });
@@ -107,6 +109,30 @@ function upsert(sheet, keyCol, rows) {
   if (append.length) sheet.getRange(sheet.getLastRow() + 1, 1, append.length, append[0].length).setValues(append);
 }
 
+/** Returns the tab, creating it with its header row if this sheet was set up by an older version. */
+function tab(ss, name) {
+  var sh = ss.getSheetByName(name);
+  if (!sh) {
+    sh = ss.insertSheet(name);
+    sh.getRange(1, 1, 1, TABS[name].length).setValues([TABS[name]]).setFontWeight('bold').setBackground('#d9ead3');
+    sh.setFrozenRows(1);
+    sh.setRightToLeft(true);
+  }
+  return sh;
+}
+
+/** barcode -> total stock over all devices. */
+function stockTotals(ss) {
+  var sh = tab(ss, 'Stock_By_Device'), totals = {};
+  if (sh.getLastRow() < 2) return totals;
+  sh.getRange(2, 1, sh.getLastRow() - 1, 4).getValues().forEach(function (r) {
+    if (r[0] === '') return;
+    var bc = String(r[1]);
+    totals[bc] = Math.round(((totals[bc] || 0) + (Number(r[3]) || 0)) * 1000) / 1000;
+  });
+  return totals;
+}
+
 function push(ss, b) {
   var now = new Date();
   var dev = b.deviceId || '';
@@ -125,9 +151,14 @@ function push(ss, b) {
       afn(cost), s.voided ? 0 : afn(s.total - cost), s.voidedBy || ''];
   }));
   upsert(ss.getSheetByName('Sale_Items'), 10, items);
-  upsert(ss.getSheetByName('Inventory'), 1, (b.products || []).map(function (p) {
+  var prods = b.products || [];
+  upsert(tab(ss, 'Stock_By_Device'), 1, prods.map(function (p) {
+    return [String(p.barcode) + '|' + dev, String(p.barcode), dev, Number(p.stock) || 0, now];
+  }));
+  var totals = prods.length ? stockTotals(ss) : {};
+  upsert(ss.getSheetByName('Inventory'), 1, prods.map(function (p) {
     var margin = p.price ? Math.round(((p.price - (p.cost || 0)) / p.price) * 100) : 0;
-    return [String(p.barcode), p.name, afn(p.price), afn(p.cost), p.stock || 0, margin, p.quick ? 1 : 0, dt(p.updatedAt), dev, p.unit === 'kg' ? 'kg' : 'pc'];
+    return [String(p.barcode), p.name, afn(p.price), afn(p.cost), totals[String(p.barcode)] || 0, margin, p.quick ? 1 : 0, dt(p.updatedAt), dev, p.unit === 'kg' ? 'kg' : 'pc'];
   }));
   upsert(ss.getSheetByName('Purchases'), 1, (b.receivings || []).map(function (r) {
     return [r.id, dt(r.timestamp), r.batchId, r.supplier, r.invoiceNo, String(r.barcode), r.name, r.unit === 'kg' ? r.qty + ' kg' : r.qty, afn(r.cost), afn(r.price), afn(r.qty * r.cost), r.userName, r.priceChanged ? 'Yes' : ''];
@@ -165,12 +196,21 @@ function users(ss) {
   });
 }
 
-/** Lets the owner edit names/prices in the Inventory tab and pull them to the till. */
-function products(ss) {
+/**
+ * Lets the owner edit names/prices in the Inventory tab and pull them to the till.
+ * Stock: a starting count typed into the sheet (no till owns it yet) is handed to the first till that
+ * pulls it and recorded under that till; every other till gets 0, so the store total is never counted twice.
+ */
+function products(ss, dev) {
   var sh = ss.getSheetByName('Inventory');
   if (!sh || sh.getLastRow() < 2) return [];
-  return sh.getRange(2, 1, sh.getLastRow() - 1, 10).getValues().filter(function (r) { return r[0] !== ''; }).map(function (r) {
+  var owned = stockTotals(ss), claims = [], now = new Date();
+  var list = sh.getRange(2, 1, sh.getLastRow() - 1, 10).getValues().filter(function (r) { return r[0] !== ''; }).map(function (r) {
     var unit = /^\s*(kg|کیلو)/i.test(String(r[9] || '')) ? 'kg' : 'pc';
-    return { barcode: String(r[0]), name: String(r[1]), price: Math.round(Number(r[2]) * 100), cost: Math.round(Number(r[3]) * 100), stock: Number(r[4]) || 0, unit: unit };
+    var bc = String(r[0]), stock = 0;
+    if (!(bc in owned) && dev) { stock = Number(r[4]) || 0; claims.push([bc + '|' + dev, bc, dev, stock, now]); owned[bc] = stock; }
+    return { barcode: bc, name: String(r[1]), price: Math.round(Number(r[2]) * 100), cost: Math.round(Number(r[3]) * 100), stock: stock, unit: unit };
   });
+  upsert(tab(ss, 'Stock_By_Device'), 1, claims);
+  return list;
 }

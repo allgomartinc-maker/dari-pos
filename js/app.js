@@ -2,13 +2,13 @@
 import {
   formatMoney, formatNumber, parseMoney, parseIntSafe, toDariDigits, cartTotals, changeDue, marginPct, QUICK_CASH,
   AFN_DENOMS, countDenoms, shiftExpected, varianceStatus, makeReceiptId, parseReceiptQr, eanValid, normalizeBarcode, looksLikeBarcode,
-  randomId, internalBarcode, toCsv, parseCsv, dariDate, parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount, round3
+  randomId, internalBarcode, toCsv, parseCsv, dariDate, timeAgo, backupDue, parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount, round3
 } from './logic.js';
 import {
   db, getSettings, setSetting, nextSeq, createUser, setUserPin, findUserByPin, pinInUse, openShift, pendingCount,
   exportBackup, importBackup, requestPersistentStorage
 } from './db.js';
-import { syncNow, startAutoSync, onSyncChange, pullUsers, pullProducts } from './sync.js';
+import { syncNow, startAutoSync, onSyncChange, pullUsers, pullProducts, takeSheetVersion } from './sync.js';
 import { receiptDoc, zReportDoc, labelDoc, printHtml, printBluetooth, connectBluetooth, bluetoothSupported, bluetoothName } from './print.js';
 import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep, warmUpScanner, decoderName } from './scanner.js';
 import { $, $$, esc, toast, modal, confirmBox, formBox, keypadHtml, bindPinPad, askPin, download, pickFile } from './ui.js';
@@ -58,6 +58,35 @@ async function boot() {
   if (!state.s.setupDone) renderSetup(); else renderLock();
 }
 
+// Downloads a full backup and remembers when, so the app can remind the manager.
+async function doBackup() {
+  download(`dari-pos-backup-${state.s.deviceId}-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(await exportBackup()), 'application/json');
+  await setSetting('lastBackupAt', now());
+  state.s = await getSettings();
+  toast('پشتیبان دانلود شد — فایل را در جای امن نگه دارید', 'ok');
+}
+
+// Manager-only warnings on the sale screen: no recent backup, or records stuck waiting for Google Sheets.
+async function statusStrip() {
+  if (!isAdmin()) return '';
+  const s = await getSettings();
+  const out = [];
+  const since = s.lastBackupAt ? await db.sales.where('timestamp').above(s.lastBackupAt).count() : await db.sales.count();
+  if (backupDue({ lastBackupAt: s.lastBackupAt, salesSince: since })) {
+    out.push(`<div class="status-warn"><span>💾 آخرین پشتیبان: <b>${esc(timeAgo(s.lastBackupAt))}</b> — ${toDariDigits(since)} فروش پشتیبان ندارد.</span><button class="btn small" type="button" data-backup>گرفتن پشتیبان</button></div>`);
+  }
+  const pending = await pendingCount();
+  const stale = !s.lastSyncAt || Date.now() - Date.parse(s.lastSyncAt) > 3600 * 1000;
+  if (s.webhookUrl && pending && (stale || s.lastSyncError)) {
+    out.push(`<div class="status-warn"><span>☁️ ${toDariDigits(pending)} ریکارد هنوز به گوگل شیت نرفته · آخرین همگام‌سازی موفق: <b>${esc(timeAgo(s.lastSyncAt))}</b></span><button class="btn small" type="button" data-syncnow>همگام کن</button></div>`);
+  }
+  return out.join('');
+}
+function bindStatusStrip(after) {
+  $('[data-backup]')?.addEventListener('click', async () => { await doBackup(); after(); });
+  $('[data-syncnow]')?.addEventListener('click', () => $('#syncBadge').click());
+}
+
 // Installed version = the service-worker cache name (sw.js VERSION), so shops can tell us what they run.
 async function appVersion() {
   try { const k = (await caches.keys()).find((x) => x.startsWith('dari-pos-v')); return k ? k.replace('dari-pos-', '') : ''; }
@@ -79,7 +108,7 @@ async function refreshBadge() {
   state.s = s;
   // Label + detail in separate spans so phones can show just the short label.
   const set = (cls, dot, label, detail, title = '') => {
-    b.className = 'badge ' + cls; b.title = title || `${label} ${detail}`;
+    b.className = 'badge ' + cls; b.title = `${title || `${label} ${detail}`} · آخرین همگام‌سازی: ${timeAgo(s.lastSyncAt)}`;
     b.innerHTML = `${dot} <span class="bl">${esc(label)}</span>${detail ? ` <span class="bd">${esc(detail)}</span>` : ''}`;
   };
   const cnt = toDariDigits(n);
@@ -103,7 +132,7 @@ function renderSetup() {
       <label class="field">رمز مدیر (۴ تا ۶ رقم)<input name="pin" required inputmode="numeric" type="password" autocomplete="new-password"></label>
       <label class="field">تکرار رمز<input name="pin2" required inputmode="numeric" type="password" autocomplete="new-password"></label>
     </div>
-    <label class="check"><input type="checkbox" name="sample" checked> افزودن چند جنس نمونه برای آزمایش</label>
+    <label class="check"><input type="checkbox" name="sample"> 🧪 افزودن اجناس نمونه برای تمرین (قبل از فروش واقعی حذف شود)</label>
     <button class="btn primary big" type="submit">شروع</button>
   </form></div>`;
   $('#setupForm').onsubmit = async (e) => {
@@ -129,8 +158,28 @@ async function addSampleProducts() {
     ['بادنجان رومی (کیلو)', 6000, 4500, 1, 'kg'], ['کچالو (کیلو)', 4000, 3000, 1, 'kg'], ['پیاز (کیلو)', 3500, 2500, 1, 'kg']];
   for (const [name, price, cost, quick, unit = 'pc'] of items) {
     const seq = await nextSeq('internalSeq');
-    await db.products.put({ barcode: internalBarcode(seq), name, price, cost, stock: 50, quick, unit, updatedAt: now(), synced: 0 });
+    // demo:1 marks practice items; synced:1 keeps them out of the real Google Sheet.
+    await db.products.put({ barcode: internalBarcode(seq), name, price, cost, stock: 50, quick, unit, demo: 1, updatedAt: now(), synced: 1 });
   }
+}
+const demoCount = () => db.products.filter((p) => !!p.demo).count();
+async function deleteDemoProducts() {
+  const n = await db.products.filter((p) => !!p.demo).delete();
+  toast(`${toDariDigits(n)} جنس نمونه حذف شد`, 'ok');
+  return n;
+}
+// Warning strip shown while practice items are still in the system.
+async function demoBanner() {
+  const n = await demoCount();
+  if (!n) return '';
+  return `<div class="demo-banner"><span>🧪 ${toDariDigits(n)} جنس نمونه (تمرینی) هنوز در سیستم است. قبل از فروش واقعی حذف کنید.</span>
+    ${isAdmin() ? '<button class="btn small" type="button" data-deldemo>حذف اجناس نمونه</button>' : ''}</div>`;
+}
+function bindDemoBanner(after) {
+  $('[data-deldemo]')?.addEventListener('click', async () => {
+    if (!(await confirmBox('همه اجناس نمونه حذف شوند؟', { okText: 'حذف', danger: true }))) return;
+    await deleteDemoProducts(); after();
+  });
 }
 
 let failCount = 0, lockedUntil = 0;
@@ -222,7 +271,8 @@ async function renderRegister() {
     $('#goShift').onclick = () => go('shift');
     return;
   }
-  $('#main').innerHTML = `<section class="register">
+  const banner = (await demoBanner()) + (await statusStrip());
+  $('#main').innerHTML = `${banner}<section class="register">
     <div class="card">
       <div class="scanbar">
         <input id="scanInput" data-scan placeholder="بارکد را اسکن کنید یا نام جنس را بنویسید" autocomplete="off" autofocus>
@@ -248,6 +298,8 @@ async function renderRegister() {
       </div>
     </div>
   </section>`;
+  bindDemoBanner(() => renderRegister());
+  bindStatusStrip(() => renderRegister());
   const input = $('#scanInput');
   bindScanInput(input, registerCode, { onType: searchProducts });
   $('#camBtn').onclick = (e) => toggleCamera('camBox', registerCode, e.currentTarget);
@@ -281,7 +333,7 @@ async function renderRegister() {
     const b = e.target.closest('[data-bc]')?.dataset.bc; if (b) { registerCode(b); input.value = ''; $('#results').innerHTML = ''; input.focus(); } };
   $('#quickGrid').onclick = (e) => { const b = e.target.closest('[data-bc]')?.dataset.bc; if (b) registerCode(b); };
   const quick = await db.products.where('quick').equals(1).toArray();
-  $('#quickGrid').innerHTML = quick.map((p) => `<button class="btn" data-bc="${esc(p.barcode)}"><span>${p.unit === 'kg' ? '⚖ ' : ''}${esc(p.name)}</span><span class="small muted">${priceLabel(p)}</span></button>`).join('');
+  $('#quickGrid').innerHTML = quick.map((p) => `<button class="btn" data-bc="${esc(p.barcode)}"><span>${p.demo ? '🧪 ' : ''}${p.unit === 'kg' ? '⚖ ' : ''}${esc(p.name)}</span><span class="small muted">${priceLabel(p)}</span></button>`).join('');
   drawCart();
 }
 
@@ -505,7 +557,9 @@ async function renderShift() {
   const shift = await openShift();
   if (!shift) {
     const recent = await db.shifts.orderBy('openedAt').reverse().limit(1).toArray();
+    const banner = await demoBanner();
     $('#main').innerHTML = `<div class="center-screen"><form class="card setup stack" id="openForm">
+      ${banner}
       <h2>باز کردن شفت</h2>
       <p class="muted">پول موجود در دخل را در آغاز شفت بشمارید و وارد کنید.</p>
       <label class="field">پول آغاز شفت (افغانی)<input name="float" inputmode="decimal" required autofocus></label>
@@ -525,6 +579,7 @@ async function renderShift() {
       go('register');
     };
     $('#lastZ')?.addEventListener('click', () => showShiftResult(recent[0]));
+    bindDemoBanner(() => renderShift());
     return;
   }
   const moves = await db.movements.where('shiftId').equals(shift.shiftId).toArray();
@@ -545,7 +600,7 @@ async function renderShift() {
       ${moves.map((x) => `<tr><td>${label[x.type]}</td><td>${m(x.amount)}</td><td>${esc(x.note)}</td><td>${esc(x.userName)}</td><td>${esc(dariDate(x.timestamp))}</td></tr>`).join('')}
       </tbody></table>` : '<p class="muted">هنوز ثبت نشده</p>'}</div></div>`;
   $$('[data-move]').forEach((b) => b.onclick = () => addMovement(shift, b.dataset.move, label[b.dataset.move]));
-  $('#closeShift').onclick = () => blindClose(shift);
+  $('#closeShift').onclick = () => preCloseCheck(shift);
 }
 
 async function addMovement(shift, type, label) {
@@ -560,6 +615,45 @@ async function addMovement(shift, type, label) {
     approvedBy: approver.name, timestamp: ts, updatedAt: ts, synced: 0 });
   refreshBadge();
   renderShift();
+}
+
+// Safety check before the blind count. Shows counts only (never money totals), so expected cash stays hidden.
+async function preCloseCheck(shift) {
+  const sales = await db.sales.where('shiftId').equals(shift.shiftId).toArray();
+  const moves = await db.movements.where('shiftId').equals(shift.shiftId).toArray();
+  const done = sales.filter((x) => !x.voided).length, voided = sales.length - done;
+  const by = (t) => moves.filter((x) => x.type === t).length;
+  const pending = await pendingCount();
+  const s = await getSettings();
+  const warn = [];
+  if (state.cart.length) warn.push(`🛒 سبد خرید خالی نیست (${toDariDigits(state.cart.length)} قلم). اول فروش را تکمیل یا لغو کنید.`);
+  if (s.webhookUrl && pending) warn.push(`☁️ ${toDariDigits(pending)} ریکارد هنوز به گوگل شیت نرفته. اگر انترنت دارید، اول همگام کنید.`);
+  modal(`<h2>بررسی قبل از بستن شفت</h2>
+    <table class="check-table"><tbody>
+      <tr><td>شفت</td><td><span class="ltr">${esc(shift.shiftId)}</span></td></tr>
+      <tr><td>باز شده</td><td>${esc(shift.cashierName)} — ${esc(dariDate(shift.openedAt))}</td></tr>
+      <tr><td>تعداد فروش</td><td><b>${toDariDigits(done)}</b>${voided ? ` <span class="muted">(+${toDariDigits(voided)} باطل شده)</span>` : ''}</td></tr>
+      <tr><td>حرکت پول</td><td>برداشت ${toDariDigits(by('drop'))} · مصرف ${toDariDigits(by('payout'))} · افزودن ${toDariDigits(by('payin'))}</td></tr>
+      <tr><td>در انتظار ارسال به شیت</td><td><b>${toDariDigits(pending)}</b> ریکارد</td></tr>
+    </tbody></table>
+    ${warn.map((w) => `<div class="status-warn"><span>${w}</span></div>`).join('')}
+    <p class="muted small">اگر همه درست است، پول دخل را بشمارید. مقدار متوقع بعد از شمارش نشان داده می‌شود.</p>
+    <div class="actions">
+      <button class="btn danger grow" data-go ${state.cart.length ? 'disabled' : ''}>ادامه: شمارش پول</button>
+      ${s.webhookUrl && pending ? '<button class="btn" data-sync>☁️ همگام کن</button>' : ''}
+      <button class="btn" data-no>لغو</button></div>`, {
+    dismiss: false,
+    onMount: (box, close) => {
+      box.querySelector('[data-no]').onclick = close;
+      box.querySelector('[data-go]').onclick = () => { close(); blindClose(shift); };
+      box.querySelector('[data-sync]')?.addEventListener('click', async () => {
+        const r = await syncNow({ pull: false });
+        refreshBadge();
+        toast(r.ok ? 'همگام شد' : r.reason === 'offline' ? 'انترنت وصل نیست — بعداً همگام می‌شود' : 'همگام نشد: ' + (r.error || ''), r.ok ? 'ok' : 'err');
+        close(); preCloseCheck(shift);
+      });
+    }
+  });
 }
 
 function blindClose(shift) {
@@ -623,10 +717,12 @@ function showShiftResult(r) {
       <tr><td><b>شمارش شده</b></td><td><b>${m(r.countedCash)}</b></td></tr>
     </tbody></table>
     <div class="variance ${esc(r.varianceStatus)}" style="margin-top:12px">${r.variance > 0 ? '+' : ''}${m(r.variance)} — ${word}</div>
+    ${isAdmin() ? `<div class="status-warn" style="margin-top:12px"><span>💾 پشتیبان روزانه: آخرین پشتیبان ${esc(timeAgo(state.s.lastBackupAt))}</span><button class="btn small" data-backup2>گرفتن پشتیبان</button></div>` : ''}
     <div class="actions"><button class="btn primary" data-print>🖨 چاپ گزارش Z</button>
       ${bluetoothSupported() ? '<button class="btn" data-bt>📶 بلوتوث</button>' : ''}<button class="btn" data-close>بستن</button></div>`, {
     onMount: (box, close) => {
       box.querySelector('[data-close]').onclick = close;
+      box.querySelector('[data-backup2]')?.addEventListener('click', async (e) => { await doBackup(); e.target.closest('.status-warn').innerHTML = '<span>💾 ✔ پشتیبان گرفته شد</span>'; });
       box.querySelector('[data-print]').onclick = () => printHtml(zReportDoc(r, state.s), state.s.paperWidth);
       box.querySelector('[data-bt]')?.addEventListener('click', () => btPrint(zReportDoc(r, state.s)));
     }
@@ -757,7 +853,7 @@ async function renderProducts() {
       <button class="btn" id="expCsv">صادرات CSV</button><button class="btn" id="impCsv">واردات CSV</button>
       <button class="btn" id="pullSheet">دریافت قیمت‌ها از شیت</button></div>
     <input id="prodSearch" data-scan placeholder="جستجو با نام یا بارکد" autocomplete="off">
-    <div class="table-wrap"><table><thead><tr><th>نام</th><th>بارکد</th><th>قیمت فروش</th><th>قیمت خرید</th><th>مفاد</th><th>موجودی</th><th>⭐</th><th></th></tr></thead>
+    <div class="table-wrap"><table><thead><tr><th>نام</th><th>بارکد</th><th>قیمت فروش</th><th>قیمت خرید</th><th>مفاد</th><th title="فقط فروش و دریافت همین دستگاه. مجموع همه دستگاه‌ها در گوگل شیت است.">موجودی (این دستگاه)</th><th>⭐</th><th></th></tr></thead>
     <tbody id="prodRows"></tbody></table></div></div>`;
   const draw = async (q = '') => {
     const nq = normalizeBarcode(q);
@@ -802,10 +898,47 @@ async function renderProducts() {
     draw();
   };
   $('#pullSheet').onclick = async () => {
-    try { const n = await pullProducts(); toast(`${toDariDigits(n)} جنس از گوگل شیت به‌روز شد`, 'ok'); draw(); }
+    try {
+      const { n, conflicts } = await pullProducts();
+      toast(`${toDariDigits(n)} جنس از گوگل شیت به‌روز شد`, 'ok');
+      if (conflicts.length) await resolveConflicts(conflicts);
+      draw(); refreshBadge();
+    }
     catch (err) { toast(navigator.onLine ? err.message : 'برای این کار انترنت لازم است', 'err'); }
   };
   draw();
+}
+
+// A product was changed on this device (not yet sent) AND differently in the sheet: the manager picks one.
+function resolveConflicts(conflicts) {
+  const label = { name: 'نام', price: 'قیمت فروش', cost: 'قیمت خرید', unit: 'واحد' };
+  const show = (f, o) => (f === 'price' || f === 'cost' ? formatMoney(o[f]) : f === 'unit' ? (o[f] === 'kg' ? 'کیلو' : 'دانه') : o[f]);
+  return new Promise((resolve) => {
+    modal(`<h2>⚠️ تفاوت بین این دستگاه و گوگل شیت</h2>
+      <p class="muted small">این اجناس در این دستگاه تغییر کرده‌اند ولی هنوز به گوگل شیت نرفته‌اند، و در شیت هم تغییر کرده‌اند. برای هر کدام انتخاب کنید کدام درست است.</p>
+      <div class="stack" id="cfList">${conflicts.map((c, i) => `<div class="card conflict" data-i="${i}">
+        <b>${esc(c.local.name)}</b> <span class="ltr small muted">${esc(c.local.barcode)}</span>
+        <table class="small"><tr><th></th><th>این دستگاه</th><th>گوگل شیت</th></tr>
+        ${c.fields.map((f) => `<tr><td>${label[f]}</td><td>${esc(String(show(f, c.local)))}</td><td>${esc(String(show(f, c.sheet)))}</td></tr>`).join('')}</table>
+        <div class="row"><button class="btn grow" data-keep="local">نگه‌داشتن این دستگاه</button><button class="btn grow" data-keep="sheet">گرفتن از شیت</button></div>
+      </div>`).join('')}</div>
+      <div class="actions"><button class="btn" data-all="local">همه: این دستگاه</button><button class="btn" data-all="sheet">همه: گوگل شیت</button></div>`, {
+      dismiss: false,
+      onMount: (box, close) => {
+        let left = conflicts.length;
+        const done = async (i, keep) => {
+          const card = box.querySelector(`.conflict[data-i="${i}"]`);
+          if (!card || card.dataset.done) return;
+          card.dataset.done = '1';
+          if (keep === 'sheet') await takeSheetVersion(conflicts[i]); // 'local' stays unsynced and is sent on next sync
+          card.innerHTML = `<b>${esc(conflicts[i].local.name)}</b> ✔ ${keep === 'sheet' ? 'از شیت گرفته شد' : 'نسخه این دستگاه ماند'}`;
+          if (--left === 0) { close(); toast('تفاوت‌ها حل شد', 'ok'); resolve(); }
+        };
+        box.querySelector('#cfList').onclick = (e) => { const b = e.target.closest('[data-keep]'); if (b) done(+b.closest('.conflict').dataset.i, b.dataset.keep); };
+        box.querySelectorAll('[data-all]').forEach((b) => { b.onclick = async () => { for (let i = 0; i < conflicts.length; i++) await done(i, b.dataset.all); }; });
+      }
+    });
+  });
 }
 
 function editProduct(p, after, { isNew = !p.name } = {}) {
@@ -930,11 +1063,19 @@ async function renderSettings() {
       </div>
       <label class="check"><input type="checkbox" name="autoPrint" ${s.autoPrint ? 'checked' : ''}> چاپ خودکار رسید بعد از هر فروش</label>
       <h3>☁️ گوگل شیت (دفتر پشتیبان — فقط این بخش انترنت لازم دارد)</h3>
+      <details class="multi-note"><summary>چند دستگاه با یک گوگل شیت؟ (حتماً بخوانید)</summary>
+        <ul class="small">
+          <li>هر دستگاه فروش و موجودی خودش را نگه می‌دارد. «موجودی» در این دستگاه = جنس دریافت شده منهای فروش <b>همین دستگاه</b>.</li>
+          <li>در گوگل شیت، تب <b>Stock_By_Device</b> موجودی هر دستگاه را جدا نشان می‌دهد و ستون موجودی <b>Inventory</b> مجموع همه دستگاه‌هاست.</li>
+          <li>کد هر دستگاه باید فرق کند (T1، T2 …).</li>
+          <li>شمارش و اصلاح موجودی را فقط در یک دستگاه (دستگاه اصلی) انجام دهید.</li>
+          <li>برای شروع، یک دستگاه در هر دوکان پیشنهاد می‌شود.</li>
+        </ul></details>
       <label class="field">آدرس Web App (Apps Script)<input name="webhookUrl" value="${esc(s.webhookUrl)}" class="ltr" placeholder="https://script.google.com/macros/s/.../exec"></label>
       <label class="field">کلید امنیتی (همان SYNC_TOKEN در Apps Script)<input name="syncToken" value="${esc(s.syncToken)}" class="ltr" type="password" autocomplete="off"></label>
       <div class="row"><button class="btn primary" type="submit">ذخیره تنظیمات</button><button class="btn" type="button" id="syncBtn">همگام‌سازی اکنون</button>
         <button class="btn" type="button" id="pullUsersBtn">دریافت کاربران از شیت</button></div>
-      <p class="small muted">آخرین همگام‌سازی: ${s.lastSyncAt ? esc(dariDate(s.lastSyncAt)) : 'هرگز'} ${s.lastSyncError ? ' · خطا: ' + esc(s.lastSyncError) : ''}</p>
+      <p class="small"><b>آخرین همگام‌سازی موفق: ${esc(timeAgo(s.lastSyncAt))}</b>${s.lastSyncAt ? ` <span class="muted">(${esc(dariDate(s.lastSyncAt))})</span>` : ''} · در انتظار ارسال: <b>${toDariDigits(await pendingCount())}</b>${s.lastSyncError ? ` · <span class="err-text">خطا: ${esc(s.lastSyncError)}</span>` : ''}</p>
     </form>
     <div class="card stack"><div class="row"><h2 style="margin:0">👥 کاربران</h2><span class="spacer"></span><button class="btn primary" id="addUser">+ کاربر جدید</button></div>
       <table><thead><tr><th>نام</th><th>نقش</th><th>منبع</th><th>وضعیت</th><th></th></tr></thead><tbody id="userRows">
@@ -947,7 +1088,8 @@ async function renderSettings() {
       <div class="row"><button class="btn" id="testPrint">چاپ آزمایشی</button>
       ${bluetoothSupported() ? `<button class="btn" id="btConnect">وصل کردن چاپگر بلوتوث ${bluetoothName() ? '(' + esc(bluetoothName()) + ')' : ''}</button><button class="btn" id="btTest">آزمایش بلوتوث</button>` : '<span class="muted small">این مرورگر بلوتوث را پشتیبانی نمی‌کند</span>'}</div></div>
     <div class="card stack"><h2>💾 پشتیبان</h2>
-      <p class="muted small">ذخیره دائمی دستگاه: ${persisted ? '✔ فعال' : '✖ فعال نیست — اپ را نصب کنید (Add to Home Screen)'} · پشتیبان را هر هفته در فلش یا جای امن نگه دارید.</p>
+      <p><b>آخرین پشتیبان: ${esc(timeAgo(s.lastBackupAt))}</b>${s.lastBackupAt ? ` <span class="muted small">(${esc(dariDate(s.lastBackupAt))})</span>` : ''}</p>
+      <p class="muted small">ذخیره دائمی دستگاه: ${persisted ? '✔ فعال' : '✖ فعال نیست — اپ را نصب کنید (Add to Home Screen)'} · هر روز پس از بستن شفت پشتیبان بگیرید و فایل را در فلش، واتساپ یا ایمیل خود نگه دارید.</p>
       <div class="row"><button class="btn" id="backup">دانلود پشتیبان کامل (JSON)</button><button class="btn" id="restore">بازیابی از پشتیبان</button></div></div>
   </div>`;
   $('#sf').onsubmit = async (e) => {
@@ -1002,7 +1144,7 @@ async function renderSettings() {
   $('#testPrint').onclick = () => printHtml(receiptDoc(sample, state.s), state.s.paperWidth);
   $('#btConnect')?.addEventListener('click', async () => { try { toast('وصل شد: ' + (await connectBluetooth()), 'ok'); renderSettings(); } catch (err) { toast(err.message, 'err'); } });
   $('#btTest')?.addEventListener('click', () => btPrint(receiptDoc(sample, state.s)));
-  $('#backup').onclick = async () => download(`dari-pos-backup-${new Date().toISOString().slice(0, 10)}.json`, JSON.stringify(await exportBackup()), 'application/json');
+  $('#backup').onclick = async () => { await doBackup(); renderSettings(); };
   $('#restore').onclick = async () => {
     const f = await pickFile('.json,application/json');
     if (!f) return;

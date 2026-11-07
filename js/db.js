@@ -29,7 +29,8 @@ const DEFAULTS = {
   internalSeq: 0,
   setupDone: false,
   lastSyncAt: null,
-  lastSyncError: null
+  lastSyncError: null,
+  lastBackupAt: null
 };
 
 export async function getSetting(key) {

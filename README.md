@@ -61,7 +61,31 @@ Users tab: `Name | Role (admin/cashier or مدیر/صندوقدار) | PIN (4–
 - 4–6 digit PINs are hashed (SHA-256 + salt) on the device. They stop casual misuse; they are not strong protection against someone who has the device and technical skill.
 - Anyone with the Web App URL **and** the SYNC_TOKEN can write to your sheet. Keep both private; if leaked, change `SYNC_TOKEN` in *Apps Script › Project Settings › Script Properties* and in the app.
 - Data lives in the browser's storage. Install the app (so storage is "persistent") and download a backup weekly (تنظیمات › پشتیبان).
-- One device per sheet is assumed for stock numbers. Several tills can sync to one sheet (receipt IDs include the device code), but stock counts are per device.
+- Data lives in the browser's storage. The sale screen warns the manager when there is no backup for more than a day of sales, and when records have waited more than an hour for Google Sheets.
+
+## Several devices on one sheet
+
+Version 1 is designed for **one device per shop**. Several tills can share a sheet, with these rules:
+
+- Each device keeps its own sales and its own stock. On a device, *stock = received − sold on that device*.
+- Every till's stock goes into its own row of the **Stock_By_Device** tab. The **Inventory** stock column is the sum over all tills, so tills never overwrite each other's numbers.
+- Starting stock typed into the sheet for a new product is handed to the first till that pulls products. Other tills start that product at 0, so it is not counted twice.
+- Give every device a different code (T1, T2 …) and do stock counts / corrections on one main device.
+- Pulling products never overwrites a product edited on the device but not yet synced. The manager sees both versions and chooses.
+- Re-sending is safe: every row is keyed by its receipt / shift / movement ID, so a retried upload updates the same row instead of adding a duplicate.
+
+Google Sheets is the **back-office report**, not a live shared database. Shared live stock across tills, with conflict handling for simultaneous edits, needs a real backend. That is the next step if shops run more than one till.
+
+## Before giving it to a shop: test on the real devices
+
+Do this once per phone/tablet model, iPhone/iPad separately from Android:
+
+1. Open the site with internet → Add to Home Screen → open from the icon. The lock screen shows the version (نسخه vN).
+2. Turn on airplane mode, close the app completely, reopen it. It must open and log in.
+3. Still offline: open a shift, make 3 sales (one weighed, one scanned with the camera), void one, print or skip.
+4. Close the app again, reopen offline → the sales are still in گزارش‌ها.
+5. Turn internet back on → the badge goes to 🟢 within a minute; check Sales / Sale_Items / Stock_By_Device in the sheet.
+6. Close the shift (check screen → count → result) and download a backup.
 
 ## Files
 

@@ -1,7 +1,7 @@
 // Online-only part: pushes queued records to the Google Apps Script web app and pulls users / prices.
 // Everything else works without internet. Records stay synced=0 until the server answers {ok:true}.
 import { db, getSettings, setSetting } from './db.js';
-import { normalizeUnit } from './logic.js';
+import { mergePulledProduct } from './logic.js';
 
 const TABLES = ['sales', 'receivings', 'shifts', 'movements', 'products'];
 const BATCH = 200;
@@ -82,25 +82,30 @@ export async function pullUsers(s) {
 }
 
 // Admin action: take names / prices / costs from the sheet's Inventory tab. Local stock is kept.
+// Products with unsynced edits on this device are NOT overwritten: they come back as conflicts for the manager.
 export async function pullProducts() {
   const s = await getSettings();
   if (!s.webhookUrl) throw new Error('آدرس گوگل شیت تنظیم نشده');
   const res = await post(s.webhookUrl, { action: 'products', token: s.syncToken, deviceId: s.deviceId });
   let n = 0;
+  const conflicts = [];
+  const nowIso = new Date().toISOString();
   await db.transaction('rw', db.products, async () => {
     for (const p of res.products || []) {
       if (!p.barcode) continue;
-      const cur = await db.products.get(String(p.barcode));
-      await db.products.put({
-        barcode: String(p.barcode), name: String(p.name || cur?.name || ''), price: num(p.price ?? cur?.price),
-        cost: num(p.cost ?? cur?.cost), stock: cur ? cur.stock : Math.max(0, Number(p.stock) || 0), quick: cur?.quick || 0,
-        unit: p.unit ? normalizeUnit(p.unit) : cur?.unit || 'pc',
-        updatedAt: cur?.updatedAt || new Date().toISOString(), synced: 1
-      });
-      n++;
+      const r = mergePulledProduct(await db.products.get(String(p.barcode)), p, nowIso);
+      if (r.action === 'put') { await db.products.put(r.row); n++; }
+      else if (r.action === 'conflict') conflicts.push(r);
     }
   });
-  return n;
+  return { n, conflicts };
+}
+
+// Manager chose the sheet's version for a conflicting product.
+export async function takeSheetVersion(conflict) {
+  const cur = await db.products.get(conflict.local.barcode);
+  if (!cur) return;
+  await db.products.put({ ...cur, ...conflict.sheet, updatedAt: new Date().toISOString(), synced: 1 });
 }
 
 const num = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : 0);

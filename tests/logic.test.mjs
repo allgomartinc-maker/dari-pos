@@ -4,7 +4,7 @@ import {
   toLatinDigits, toDariDigits, parseMoney, formatMoney, cartTotals, changeDue,
   marginPct, countDenoms, AFN_DENOMS, shiftExpected, varianceStatus, hashPin,
   makeReceiptId, receiptQr, parseReceiptQr, eanValid, normalizeBarcode, looksLikeBarcode,
-  packRaster, csvEscape, toCsv, parseCsv, applySaleToStock
+  packRaster, csvEscape, toCsv, parseCsv, applySaleToStock, mergePulledProduct, timeAgo, backupDue
 } from '../js/logic.js';
 
 test('digit conversion handles Persian, Arabic-Indic and Latin', () => {
@@ -207,4 +207,53 @@ test('looksLikeBarcode: scanner output vs typed product names', () => {
   assert.equal(looksLikeBarcode('red apple'), false);
   assert.equal(looksLikeBarcode('12'), false);
   assert.equal(looksLikeBarcode(''), false);
+});
+
+test('mergePulledProduct: new sheet product is added with its stock', () => {
+  const r = mergePulledProduct(null, { barcode: '111', name: 'چای', price: 5000, cost: 4000, stock: 12, unit: 'pc' }, 'T');
+  assert.equal(r.action, 'put');
+  assert.deepEqual(r.row, { barcode: '111', name: 'چای', price: 5000, cost: 4000, stock: 12, quick: 0, unit: 'pc', updatedAt: 'T', synced: 1 });
+});
+
+test('mergePulledProduct: synced local product takes sheet name/price/cost but keeps local stock and quick', () => {
+  const cur = { barcode: '111', name: 'چای', price: 5000, cost: 4000, stock: 3, quick: 1, unit: 'pc', updatedAt: 'A', synced: 1 };
+  const r = mergePulledProduct(cur, { barcode: '111', name: 'چای سبز', price: 5500, cost: 4000, stock: 99, unit: 'pc' }, 'T');
+  assert.equal(r.action, 'put');
+  assert.equal(r.row.name, 'چای سبز');
+  assert.equal(r.row.price, 5500);
+  assert.equal(r.row.stock, 3);
+  assert.equal(r.row.quick, 1);
+  assert.equal(r.row.synced, 1);
+});
+
+test('mergePulledProduct: unsynced local edit that differs from the sheet is a conflict, not overwritten', () => {
+  const cur = { barcode: '111', name: 'چای', price: 6000, cost: 4000, stock: 3, quick: 0, unit: 'pc', updatedAt: 'A', synced: 0 };
+  const r = mergePulledProduct(cur, { barcode: '111', name: 'چای', price: 5000, cost: 4000, stock: 3, unit: 'pc' }, 'T');
+  assert.equal(r.action, 'conflict');
+  assert.deepEqual(r.fields, ['price']);
+  assert.equal(r.sheet.price, 5000);
+  assert.equal(r.local.price, 6000);
+});
+
+test('mergePulledProduct: unsynced local edit equal to the sheet is left alone', () => {
+  const cur = { barcode: '111', name: 'چای', price: 5000, cost: 4000, stock: 3, quick: 0, unit: 'pc', updatedAt: 'A', synced: 0 };
+  assert.equal(mergePulledProduct(cur, { barcode: '111', name: 'چای', price: 5000, cost: 4000, stock: 8, unit: 'pc' }, 'T').action, 'same');
+});
+
+test('timeAgo: short Dari "how long ago" text', () => {
+  const now = Date.parse('2026-11-07T12:00:00Z');
+  assert.equal(timeAgo(null, now), 'هرگز');
+  assert.equal(timeAgo('2026-11-07T11:59:30Z', now), 'همین حالا');
+  assert.equal(timeAgo('2026-11-07T11:55:00Z', now), '۵ دقیقه پیش');
+  assert.equal(timeAgo('2026-11-07T09:00:00Z', now), '۳ ساعت پیش');
+  assert.equal(timeAgo('2026-11-05T12:00:00Z', now), '۲ روز پیش');
+});
+
+test('backupDue: needs a backup when there are sales and none in the last 24 hours', () => {
+  const now = Date.parse('2026-11-07T12:00:00Z');
+  assert.equal(backupDue({ lastBackupAt: null, salesSince: 0 }, now), false);
+  assert.equal(backupDue({ lastBackupAt: null, salesSince: 3 }, now), true);
+  assert.equal(backupDue({ lastBackupAt: '2026-11-07T08:00:00Z', salesSince: 3 }, now), false);
+  assert.equal(backupDue({ lastBackupAt: '2026-11-06T08:00:00Z', salesSince: 3 }, now), true);
+  assert.equal(backupDue({ lastBackupAt: '2026-11-06T08:00:00Z', salesSince: 0 }, now), false);
 });

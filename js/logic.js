@@ -255,3 +255,42 @@ export function internalBarcode(seq) {
   body.split('').reverse().forEach((d, i) => { sum += +d * (i % 2 === 0 ? 3 : 1); });
   return body + ((10 - (sum % 10)) % 10);
 }
+
+// Decides what pulling one product from the Google Sheet does to the local copy.
+//  - new barcode → add it (with the sheet's stock as a starting count)
+//  - local copy already synced → take the sheet's name / price / cost / unit, keep local stock and quick button
+//  - local copy has unsynced edits that differ → 'conflict': nothing is changed until the manager chooses
+const PULL_FIELDS = ['name', 'price', 'cost', 'unit'];
+export function mergePulledProduct(cur, p, nowIso) {
+  const n = (v, d) => (Number.isFinite(Number(v)) && v !== '' && v != null ? Math.round(Number(v)) : d);
+  const sheet = {
+    name: String(p.name || cur?.name || ''),
+    price: n(p.price, cur?.price ?? 0),
+    cost: n(p.cost, cur?.cost ?? 0),
+    unit: p.unit ? normalizeUnit(p.unit) : cur?.unit || 'pc'
+  };
+  if (!cur) {
+    return { action: 'put', row: { barcode: String(p.barcode), ...sheet, stock: Math.max(0, Number(p.stock) || 0), quick: 0, updatedAt: nowIso, synced: 1 } };
+  }
+  const fields = PULL_FIELDS.filter((f) => (cur[f] ?? (f === 'unit' ? 'pc' : '')) !== sheet[f]);
+  if (cur.synced === 0) {
+    return fields.length ? { action: 'conflict', fields, local: cur, sheet } : { action: 'same' };
+  }
+  return { action: 'put', row: { ...cur, ...sheet, synced: 1 } };
+}
+
+// "۵ دقیقه پیش" style text for status lines (last sync, last backup).
+export function timeAgo(iso, nowMs = Date.now()) {
+  if (!iso) return 'هرگز';
+  const sec = Math.max(0, (nowMs - Date.parse(iso)) / 1000);
+  if (sec < 60) return 'همین حالا';
+  if (sec < 3600) return `${toDariDigits(Math.floor(sec / 60))} دقیقه پیش`;
+  if (sec < 86400) return `${toDariDigits(Math.floor(sec / 3600))} ساعت پیش`;
+  return `${toDariDigits(Math.floor(sec / 86400))} روز پیش`;
+}
+
+// A backup is due when there were sales since the last backup and the last one is older than a day (or never).
+export function backupDue({ lastBackupAt, salesSince }, nowMs = Date.now()) {
+  if (!salesSince) return false;
+  return !lastBackupAt || nowMs - Date.parse(lastBackupAt) > 24 * 3600 * 1000;
+}
