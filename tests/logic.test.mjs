@@ -4,7 +4,7 @@ import {
   toLatinDigits, toDariDigits, parseMoney, formatMoney, cartTotals, changeDue,
   marginPct, countDenoms, AFN_DENOMS, shiftExpected, varianceStatus, hashPin,
   makeReceiptId, receiptQr, parseReceiptQr, eanValid, normalizeBarcode, looksLikeBarcode,
-  packRaster, csvEscape, toCsv, parseCsv, applySaleToStock, mergePulledProduct, timeAgo, backupDue
+  packRaster, csvEscape, toCsv, parseCsv, applySaleToStock, mergePulledProduct, timeAgo, backupDue, stampPrice, cartMixError, isPracticeSale, realSales
 } from '../js/logic.js';
 
 test('digit conversion handles Persian, Arabic-Indic and Latin', () => {
@@ -226,8 +226,8 @@ test('mergePulledProduct: synced local product takes sheet name/price/cost but k
   assert.equal(r.row.synced, 1);
 });
 
-test('mergePulledProduct: unsynced local edit that differs from the sheet is a conflict, not overwritten', () => {
-  const cur = { barcode: '111', name: 'چای', price: 6000, cost: 4000, stock: 3, quick: 0, unit: 'pc', updatedAt: 'A', synced: 0 };
+test('mergePulledProduct: unsent local price edit that differs from the sheet is a conflict, not overwritten', () => {
+  const cur = { barcode: '111', name: 'چای', price: 6000, cost: 4000, stock: 3, quick: 0, unit: 'pc', updatedAt: 'A', synced: 0, priceAt: 'A' };
   const r = mergePulledProduct(cur, { barcode: '111', name: 'چای', price: 5000, cost: 4000, stock: 3, unit: 'pc' }, 'T');
   assert.equal(r.action, 'conflict');
   assert.deepEqual(r.fields, ['price']);
@@ -235,8 +235,8 @@ test('mergePulledProduct: unsynced local edit that differs from the sheet is a c
   assert.equal(r.local.price, 6000);
 });
 
-test('mergePulledProduct: unsynced local edit equal to the sheet is left alone', () => {
-  const cur = { barcode: '111', name: 'چای', price: 5000, cost: 4000, stock: 3, quick: 0, unit: 'pc', updatedAt: 'A', synced: 0 };
+test('mergePulledProduct: unsent local price edit equal to the sheet is left alone', () => {
+  const cur = { barcode: '111', name: 'چای', price: 5000, cost: 4000, stock: 3, quick: 0, unit: 'pc', updatedAt: 'A', synced: 0, priceAt: 'A' };
   assert.equal(mergePulledProduct(cur, { barcode: '111', name: 'چای', price: 5000, cost: 4000, stock: 8, unit: 'pc' }, 'T').action, 'same');
 });
 
@@ -256,4 +256,33 @@ test('backupDue: needs a backup when there are sales and none in the last 24 hou
   assert.equal(backupDue({ lastBackupAt: '2026-11-07T08:00:00Z', salesSince: 3 }, now), false);
   assert.equal(backupDue({ lastBackupAt: '2026-11-06T08:00:00Z', salesSince: 3 }, now), true);
   assert.equal(backupDue({ lastBackupAt: '2026-11-06T08:00:00Z', salesSince: 0 }, now), false);
+});
+
+test('mergePulledProduct: a stock-only change waiting to sync takes the sheet price and stays unsynced', () => {
+  // Till sold items offline (stock changed, price untouched); meanwhile the owner raised the price in the sheet.
+  const cur = { barcode: '111', name: 'چای', price: 5000, cost: 4000, stock: 2, quick: 0, unit: 'pc', updatedAt: 'B', synced: 0, priceAt: 'A', priceSentAt: 'A' };
+  const r = mergePulledProduct(cur, { barcode: '111', name: 'چای', price: 5500, cost: 4000, stock: 9, unit: 'pc' }, 'T');
+  assert.equal(r.action, 'put');
+  assert.equal(r.row.price, 5500);
+  assert.equal(r.row.stock, 2);
+  assert.equal(r.row.synced, 0); // the stock change must still be sent
+});
+
+test('stampPrice: only name / price / cost / unit changes get a new price time', () => {
+  const cur = { barcode: '1', name: 'a', price: 100, cost: 50, unit: 'pc', stock: 5, priceAt: 'OLD' };
+  assert.equal(stampPrice(cur, { ...cur, stock: 4 }, 'NOW').priceAt, 'OLD');
+  assert.equal(stampPrice(cur, { ...cur, price: 120 }, 'NOW').priceAt, 'NOW');
+  assert.equal(stampPrice(cur, { ...cur, name: 'b' }, 'NOW').priceAt, 'NOW');
+  assert.equal(stampPrice(null, { barcode: '2', name: 'x', price: 1, cost: 0, unit: 'pc' }, 'NOW').priceAt, 'NOW');
+});
+
+test('practice sales: a cart is all practice items or all real items, and practice sales stay out of totals', () => {
+  assert.equal(cartMixError([], { demo: 1 }), null);
+  assert.equal(cartMixError([{ demo: 1 }], { demo: 1 }), null);
+  assert.equal(cartMixError([{ barcode: 'x' }], { barcode: 'y' }), null);
+  assert.match(cartMixError([{ demo: 1 }], { barcode: 'y' }), /نمونه/);
+  assert.match(cartMixError([{ barcode: 'x' }], { demo: 1 }), /نمونه/);
+  assert.equal(isPracticeSale([{ demo: 1 }]), true);
+  assert.equal(isPracticeSale([{ barcode: 'x' }]), false);
+  assert.deepEqual(realSales([{ id: 1 }, { id: 2, practice: 1 }]).map((x) => x.id), [1]);
 });

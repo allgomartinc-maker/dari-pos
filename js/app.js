@@ -2,13 +2,13 @@
 import {
   formatMoney, formatNumber, parseMoney, parseIntSafe, toDariDigits, cartTotals, changeDue, marginPct, QUICK_CASH,
   AFN_DENOMS, countDenoms, shiftExpected, varianceStatus, makeReceiptId, parseReceiptQr, eanValid, normalizeBarcode, looksLikeBarcode,
-  randomId, internalBarcode, toCsv, parseCsv, dariDate, timeAgo, backupDue, parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount, round3
+  randomId, internalBarcode, toCsv, parseCsv, dariDate, timeAgo, backupDue, stampPrice, cartMixError, isPracticeSale, realSales, parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount, round3
 } from './logic.js';
 import {
   db, getSettings, setSetting, nextSeq, createUser, setUserPin, findUserByPin, pinInUse, openShift, pendingCount,
   exportBackup, importBackup, requestPersistentStorage
 } from './db.js';
-import { syncNow, startAutoSync, onSyncChange, pullUsers, pullProducts, takeSheetVersion } from './sync.js';
+import { syncNow, startAutoSync, onSyncChange, pullUsers, pullProducts, takeSheetVersion, keepLocalVersion } from './sync.js';
 import { receiptDoc, zReportDoc, labelDoc, printHtml, printBluetooth, connectBluetooth, bluetoothSupported, bluetoothName } from './print.js';
 import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep, warmUpScanner, decoderName } from './scanner.js';
 import { $, $$, esc, toast, modal, confirmBox, formBox, keypadHtml, bindPinPad, askPin, download, pickFile } from './ui.js';
@@ -71,7 +71,7 @@ async function statusStrip() {
   if (!isAdmin()) return '';
   const s = await getSettings();
   const out = [];
-  const since = s.lastBackupAt ? await db.sales.where('timestamp').above(s.lastBackupAt).count() : await db.sales.count();
+  const since = await (s.lastBackupAt ? db.sales.where('timestamp').above(s.lastBackupAt) : db.sales.toCollection()).filter((x) => !x.practice).count();
   if (backupDue({ lastBackupAt: s.lastBackupAt, salesSince: since })) {
     out.push(`<div class="status-warn"><span>💾 آخرین پشتیبان: <b>${esc(timeAgo(s.lastBackupAt))}</b> — ${toDariDigits(since)} فروش پشتیبان ندارد.</span><button class="btn small" type="button" data-backup>گرفتن پشتیبان</button></div>`);
   }
@@ -165,7 +165,9 @@ async function addSampleProducts() {
 const demoCount = () => db.products.filter((p) => !!p.demo).count();
 async function deleteDemoProducts() {
   const n = await db.products.filter((p) => !!p.demo).delete();
-  toast(`${toDariDigits(n)} جنس نمونه حذف شد`, 'ok');
+  const ns = await db.sales.filter((x) => !!x.practice).delete();
+  await db.receivings.filter((x) => !!x.practice).delete();
+  toast(`${toDariDigits(n)} جنس نمونه و ${toDariDigits(ns)} فروش تمرینی حذف شد`, 'ok');
   return n;
 }
 // Warning strip shown while practice items are still in the system.
@@ -177,7 +179,7 @@ async function demoBanner() {
 }
 function bindDemoBanner(after) {
   $('[data-deldemo]')?.addEventListener('click', async () => {
-    if (!(await confirmBox('همه اجناس نمونه حذف شوند؟', { okText: 'حذف', danger: true }))) return;
+    if (!(await confirmBox('همه اجناس نمونه و فروش‌های تمرینی حذف شوند؟', { okText: 'حذف', danger: true }))) return;
     await deleteDemoProducts(); after();
   });
 }
@@ -356,18 +358,20 @@ async function registerCode(code) {
     if (!eanValid(code)) return toast('بارکد درست خوانده نشد، دوباره اسکن کنید', 'err');
     return notFound({ barcode: code });
   }
+  const mix = cartMixError(state.cart, p);
+  if (mix) { beep('err'); return toast(mix, 'err'); }
   beep('ok');
   if (p.unit === 'kg') {
     const w = await askWeight(p);
     if (!w) return;
-    state.cart.unshift({ barcode: p.barcode, name: p.name, price: p.price, cost: p.cost || 0, qty: w, unit: 'kg' });
+    state.cart.unshift({ barcode: p.barcode, name: p.name, price: p.price, cost: p.cost || 0, qty: w, unit: 'kg', ...(p.demo ? { demo: 1 } : {}) });
     if ((p.stock || 0) <= 0) toast(`موجودی «${p.name}» در سیستم صفر است`);
     drawCart();
     return;
   }
   const line = state.cart.find((l) => l.barcode === p.barcode && !l.override);
   if (line) line.qty++;
-  else state.cart.unshift({ barcode: p.barcode, name: p.name, price: p.price, cost: p.cost || 0, qty: 1 });
+  else state.cart.unshift({ barcode: p.barcode, name: p.name, price: p.price, cost: p.cost || 0, qty: 1, ...(p.demo ? { demo: 1 } : {}) });
   if ((p.stock || 0) <= 0) toast(`موجودی «${p.name}» در سیستم صفر است`);
   drawCart();
 }
@@ -468,18 +472,21 @@ async function completeSale() {
   if (!shift) return toast('شفت باز نیست', 'err');
   const seq = await nextSeq('receiptSeq');
   const ts = now();
+  // Practice (🧪) sales are kept on the device only: never sent to Google Sheets, never in reports or shift totals.
+  const practice = isPracticeSale(state.cart);
   const sale = {
     receiptId: makeReceiptId(state.s.deviceId, seq), shiftId: shift.shiftId, cashierId: state.user.id, cashierName: state.user.name,
     timestamp: ts, items: state.cart.map((l) => ({ ...l })), total, cashReceived: tendered, changeGiven: tendered - total,
-    voided: 0, synced: 0, updatedAt: ts
+    voided: 0, synced: practice ? 1 : 0, updatedAt: ts, ...(practice ? { practice: 1 } : {})
   };
   await db.transaction('rw', db.sales, db.products, async () => {
     await db.sales.add(sale);
     for (const l of sale.items) {
       const p = await db.products.get(l.barcode);
-      if (p) await db.products.update(l.barcode, { stock: addQty(p.stock, -l.qty), updatedAt: ts, synced: 0 });
+      if (p) await db.products.update(l.barcode, { stock: addQty(p.stock, -l.qty), updatedAt: ts, synced: p.demo ? 1 : 0 });
     }
   });
+  if (practice) toast('🧪 فروش تمرینی — به گزارش و گوگل شیت نمی‌رود');
   beep('done');
   state.cart = []; state.tendered = '';
   renderRegister();
@@ -543,10 +550,10 @@ async function showReceipt(receiptId) {
 async function voidSale(sale, admin) {
   const ts = now();
   await db.transaction('rw', db.sales, db.products, async () => {
-    await db.sales.update(sale.receiptId, { voided: 1, voidedBy: admin.name, voidedAt: ts, updatedAt: ts, synced: 0 });
+    await db.sales.update(sale.receiptId, { voided: 1, voidedBy: admin.name, voidedAt: ts, updatedAt: ts, synced: sale.practice ? 1 : 0 });
     for (const l of sale.items) {
       const p = await db.products.get(l.barcode);
-      if (p) await db.products.update(l.barcode, { stock: addQty(p.stock, l.qty), updatedAt: ts, synced: 0 });
+      if (p) await db.products.update(l.barcode, { stock: addQty(p.stock, l.qty), updatedAt: ts, synced: p.demo ? 1 : 0 });
     }
   });
   refreshBadge();
@@ -619,7 +626,8 @@ async function addMovement(shift, type, label) {
 
 // Safety check before the blind count. Shows counts only (never money totals), so expected cash stays hidden.
 async function preCloseCheck(shift) {
-  const sales = await db.sales.where('shiftId').equals(shift.shiftId).toArray();
+  const all = await db.sales.where('shiftId').equals(shift.shiftId).toArray();
+  const sales = realSales(all), practiceN = all.length - sales.length;
   const moves = await db.movements.where('shiftId').equals(shift.shiftId).toArray();
   const done = sales.filter((x) => !x.voided).length, voided = sales.length - done;
   const by = (t) => moves.filter((x) => x.type === t).length;
@@ -632,7 +640,7 @@ async function preCloseCheck(shift) {
     <table class="check-table"><tbody>
       <tr><td>شفت</td><td><span class="ltr">${esc(shift.shiftId)}</span></td></tr>
       <tr><td>باز شده</td><td>${esc(shift.cashierName)} — ${esc(dariDate(shift.openedAt))}</td></tr>
-      <tr><td>تعداد فروش</td><td><b>${toDariDigits(done)}</b>${voided ? ` <span class="muted">(+${toDariDigits(voided)} باطل شده)</span>` : ''}</td></tr>
+      <tr><td>تعداد فروش</td><td><b>${toDariDigits(done)}</b>${voided ? ` <span class="muted">(+${toDariDigits(voided)} باطل شده)</span>` : ''}${practiceN ? ` <span class="muted">· 🧪 ${toDariDigits(practiceN)} تمرینی (حساب نمی‌شود)</span>` : ''}</td></tr>
       <tr><td>حرکت پول</td><td>برداشت ${toDariDigits(by('drop'))} · مصرف ${toDariDigits(by('payout'))} · افزودن ${toDariDigits(by('payin'))}</td></tr>
       <tr><td>در انتظار ارسال به شیت</td><td><b>${toDariDigits(pending)}</b> ریکارد</td></tr>
     </tbody></table>
@@ -689,7 +697,7 @@ function blindClose(shift) {
 }
 
 async function finalizeShift(shift, denoms, counted) {
-  const sales = await db.sales.where('shiftId').equals(shift.shiftId).toArray();
+  const sales = realSales(await db.sales.where('shiftId').equals(shift.shiftId).toArray());
   const movements = await db.movements.where('shiftId').equals(shift.shiftId).toArray();
   const exp = shiftExpected({ startingFloat: shift.startingFloat, sales, movements });
   const variance = counted - exp.expected;
@@ -832,10 +840,11 @@ async function receiveCode(code) {
     const ts = now();
     await db.transaction('rw', db.products, db.receivings, async () => {
       const cur = await db.products.get(code);
-      await db.products.put({ barcode: code, name: form.name.value.trim(), price, cost, stock: addQty(cur?.stock, qty), quick: cur?.quick || 0, unit, updatedAt: ts, synced: 0 });
+      await db.products.put(stampPrice(cur, { barcode: code, name: form.name.value.trim(), price, cost, stock: addQty(cur?.stock, qty), quick: cur?.quick || 0, unit,
+        ...(cur?.demo ? { demo: 1 } : {}), updatedAt: ts, synced: cur?.demo ? 1 : 0 }, ts));
       await db.receivings.add({ id: randomId(), batchId: state.batch.batchId, supplier: state.batch.supplier, invoiceNo: state.batch.invoiceNo,
         barcode: code, name: form.name.value.trim(), qty, unit, cost, price, total: Math.round(qty * cost), userName: state.user.name, timestamp: ts, updatedAt: ts, synced: 0,
-        priceChanged: cur ? cur.price !== price : false });
+        priceChanged: cur ? cur.price !== price : false, ...(cur?.demo ? { practice: 1, synced: 1 } : {}) });
     });
     beep('done');
     toast(`${unit === 'kg' ? formatQty(qty, 'kg') : toDariDigits(qty) + ' عدد'} «${form.name.value.trim()}» به گدام اضافه شد`, 'ok');
@@ -887,10 +896,10 @@ async function renderProducts() {
         if (!bc) continue;
         const cur = await db.products.get(bc);
         const unit = ix('unit') >= 0 ? normalizeUnit(r[ix('unit')]) : cur?.unit || 'pc';
-        await db.products.put({ barcode: bc, name: (r[ix('name')] || '').trim(), price: parseMoney(r[ix('price')]), unit,
+        await db.products.put(stampPrice(cur, { barcode: bc, name: (r[ix('name')] || '').trim(), price: parseMoney(r[ix('price')]), unit,
           cost: ix('cost') >= 0 ? parseMoney(r[ix('cost')]) : cur?.cost || 0,
           stock: ix('stock') >= 0 ? (unit === 'kg' ? parseQty(r[ix('stock')]) : parseIntSafe(r[ix('stock')])) : cur?.stock || 0,
-          quick: ix('quick') >= 0 ? (parseIntSafe(r[ix('quick')]) ? 1 : 0) : cur?.quick || 0, updatedAt: ts, synced: 0 });
+          quick: ix('quick') >= 0 ? (parseIntSafe(r[ix('quick')]) ? 1 : 0) : cur?.quick || 0, updatedAt: ts, synced: 0 }, ts));
         n++;
       }
     });
@@ -930,7 +939,8 @@ function resolveConflicts(conflicts) {
           const card = box.querySelector(`.conflict[data-i="${i}"]`);
           if (!card || card.dataset.done) return;
           card.dataset.done = '1';
-          if (keep === 'sheet') await takeSheetVersion(conflicts[i]); // 'local' stays unsynced and is sent on next sync
+          // 'local' is re-stamped as a fresh edit so the sheet accepts it on the next sync.
+          await (keep === 'sheet' ? takeSheetVersion(conflicts[i]) : keepLocalVersion(conflicts[i]));
           card.innerHTML = `<b>${esc(conflicts[i].local.name)}</b> ✔ ${keep === 'sheet' ? 'از شیت گرفته شد' : 'نسخه این دستگاه ماند'}`;
           if (--left === 0) { close(); toast('تفاوت‌ها حل شد', 'ok'); resolve(); }
         };
@@ -979,8 +989,10 @@ function editProduct(p, after, { isNew = !p.name } = {}) {
         const bc = normalizeBarcode(f.barcode.value);
         if (isNew && (await db.products.get(bc))) return toast('این بارکد قبلاً ثبت شده است', 'err');
         const unit = f.unit.value === 'kg' ? 'kg' : 'pc';
-        await db.products.put({ barcode: bc, name: f.name.value.trim(), price: parseMoney(f.price.value), cost: parseMoney(f.cost.value), unit,
-          stock: unit === 'kg' ? parseQty(f.stock.value) : parseIntSafe(f.stock.value), quick: f.quick.checked ? 1 : 0, updatedAt: now(), synced: 0 });
+        const cur = await db.products.get(bc), ts = now();
+        await db.products.put(stampPrice(cur, { barcode: bc, name: f.name.value.trim(), price: parseMoney(f.price.value), cost: parseMoney(f.cost.value), unit,
+          stock: unit === 'kg' ? parseQty(f.stock.value) : parseIntSafe(f.stock.value), quick: f.quick.checked ? 1 : 0,
+          ...(cur?.demo ? { demo: 1 } : {}), updatedAt: ts, synced: cur?.demo ? 1 : 0 }, ts));
         close(); toast('ذخیره شد', 'ok'); refreshBadge(); after?.(bc);
       };
     }
@@ -991,7 +1003,8 @@ function editProduct(p, after, { isNew = !p.name } = {}) {
 async function renderReports(dateStr) {
   const day = dateStr || new Date().toLocaleDateString('en-CA');
   const start = new Date(day + 'T00:00:00'), end = new Date(start.getTime() + 86400000);
-  const sales = await db.sales.where('timestamp').between(start.toISOString(), end.toISOString()).reverse().toArray();
+  const allSales = await db.sales.where('timestamp').between(start.toISOString(), end.toISOString()).reverse().toArray();
+  const sales = realSales(allSales), practiceN = allSales.length - sales.length;
   const good = sales.filter((s) => !s.voided);
   const net = good.reduce((a, s) => a + s.total, 0);
   const cost = good.reduce((a, s) => a + s.items.reduce((b, l) => b + Math.round((l.cost || 0) * l.qty), 0), 0);
@@ -1005,6 +1018,7 @@ async function renderReports(dateStr) {
   $('#main').innerHTML = `<div class="stack">
     <div class="card row"><h2 style="margin:0">📊 گزارش</h2>
       <input type="date" id="day" value="${day}" style="max-width:200px"><span class="muted">${esc(dariDate(start, { time: false }))}</span>
+      ${practiceN ? `<span class="muted small">🧪 ${toDariDigits(practiceN)} فروش تمرینی در این روز حساب نشده</span>` : ''}
       <span class="spacer"></span><button class="btn" id="scanRcpt">📷 اسکن QR رسید</button><button class="btn" id="expSales">صادرات فروش CSV</button></div>
     <div id="camBox" class="cam hidden"></div>
     <div class="grid2">

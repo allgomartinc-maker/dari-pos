@@ -49,7 +49,12 @@ export async function syncNow({ pull = true } = {}) {
         for (const row of payload[t]) {
           const key = db[t].schema.primKey.keyPath;
           const cur = await db[t].get(row[key]);
-          if (cur && cur.updatedAt === row.updatedAt) { await db[t].update(row[key], { synced: 1 }); sent++; }
+          if (!cur) continue;
+          const patch = {};
+          // The sheet now has this price edit; a later stock-only change will not resend it as new.
+          if (t === 'products' && row.priceAt && cur.priceAt === row.priceAt) patch.priceSentAt = row.priceAt;
+          if (cur.updatedAt === row.updatedAt) { patch.synced = 1; sent++; }
+          if (Object.keys(patch).length) await db[t].update(row[key], patch);
         }
       }
     }
@@ -101,11 +106,17 @@ export async function pullProducts() {
   return { n, conflicts };
 }
 
-// Manager chose the sheet's version for a conflicting product.
+// Manager chose the sheet's version for a conflicting product. A pending stock change (synced 0) is kept.
 export async function takeSheetVersion(conflict) {
   const cur = await db.products.get(conflict.local.barcode);
   if (!cur) return;
-  await db.products.put({ ...cur, ...conflict.sheet, updatedAt: new Date().toISOString(), synced: 1 });
+  await db.products.put({ ...cur, ...conflict.sheet, priceSentAt: cur.priceAt });
+}
+
+// Manager chose this device's version: stamp it as a fresh edit so the sheet takes it on the next sync.
+export async function keepLocalVersion(conflict) {
+  const ts = new Date().toISOString();
+  await db.products.update(conflict.local.barcode, { priceAt: ts, updatedAt: ts, synced: 0 });
 }
 
 const num = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : 0);

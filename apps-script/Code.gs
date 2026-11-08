@@ -16,7 +16,7 @@ var TABS = {
   Sales: ['Receipt ID / شماره رسید', 'Time / زمان', 'Shift / شفت', 'Cashier / صندوقدار', 'Total / مجموع', 'Cash Tendered / نقد دریافتی',
     'Change / باقی', 'Items / تعداد', 'Items Summary / اجناس', 'Status / وضعیت', 'Device / دستگاه', 'Synced At / زمان همگام', 'Cost / قیمت خرید', 'Profit / مفاد', 'Voided By / باطل توسط'],
   Sale_Items: ['Receipt ID / شماره رسید', 'Time / زمان', 'Barcode / بارکد', 'Item / جنس', 'Qty / تعداد', 'Price / قیمت', 'Line Total / مجموع', 'Unit Cost / قیمت خرید', 'Price Override / تغییر قیمت', 'Key'],
-  Inventory: ['Barcode / بارکد', 'Name / نام', 'Price / قیمت فروش', 'Cost / قیمت خرید', 'Stock (all tills) / موجودی کل', 'Margin % / مفاد', 'Quick / سریع', 'Updated / به‌روز شده', 'Device / دستگاه', 'Unit / واحد (pc / kg)'],
+  Inventory: ['Barcode / بارکد', 'Name / نام', 'Price / قیمت فروش', 'Cost / قیمت خرید', 'Stock (all tills) / موجودی کل', 'Margin % / مفاد', 'Quick / سریع', 'Price Updated / زمان تغییر قیمت', 'Device / دستگاه', 'Unit / واحد (pc / kg)'],
   Purchases: ['ID', 'Time / زمان', 'Batch / محموله', 'Supplier / عرضه‌کننده', 'Invoice / فاکتور', 'Barcode / بارکد', 'Item / جنس', 'Qty / تعداد', 'Unit Cost / قیمت خرید', 'Retail / قیمت فروش', 'Line Cost / مجموع', 'Received By / دریافت کننده', 'Price Changed / تغییر قیمت'],
   Shift_Reconciliation: ['Shift ID / شفت', 'Cashier / صندوقدار', 'Opened / باز شد', 'Closed / بسته شد', 'Start Float / پول آغاز', 'Net Cash Sales / فروش خالص', 'Pay-ins / افزوده',
     'Payouts / مصارف', 'Drops / برداشت', 'Expected / متوقع', 'Counted / شمارش', 'Variance / تفاوت', 'Status / وضعیت', 'Transactions / معاملات', 'Closed By / بسته کننده', 'Denominations / نوت‌ها'],
@@ -57,6 +57,24 @@ function setup() {
   var info = ss.getSheetByName('Setup') || ss.insertSheet('Setup');
   info.getRange('A1:B2').setValues([['SYNC_TOKEN (copy into app settings)', token], ['Keep this tab private', '']]);
   var s1 = ss.getSheetByName('Sheet1'); if (s1 && ss.getSheets().length > 1 && s1.getLastRow() === 0) ss.deleteSheet(s1);
+}
+
+/**
+ * Simple trigger: when the owner types a new name / price / cost / unit in Inventory, stamp column H
+ * so an older price edit from an offline till cannot overwrite it later.
+ */
+function onEdit(e) {
+  try {
+    var sh = e.range.getSheet();
+    if (sh.getName() !== 'Inventory') return;
+    var c1 = e.range.getColumn(), c2 = e.range.getLastColumn();
+    var touchesPrice = (c1 <= 4 && c2 >= 2) || (c1 <= 10 && c2 >= 10);
+    var r1 = Math.max(2, e.range.getRow()), r2 = e.range.getLastRow();
+    if (!touchesPrice || r2 < r1) return;
+    var stamp = [];
+    for (var i = r1; i <= r2; i++) stamp.push([new Date()]);
+    sh.getRange(r1, 8, r2 - r1 + 1, 1).setValues(stamp);
+  } catch (err) { /* never block the owner's edit */ }
 }
 
 function doGet() {
@@ -156,9 +174,20 @@ function push(ss, b) {
     return [String(p.barcode) + '|' + dev, String(p.barcode), dev, Number(p.stock) || 0, now];
   }));
   var totals = prods.length ? stockTotals(ss) : {};
-  upsert(ss.getSheetByName('Inventory'), 1, prods.map(function (p) {
+  var inv = ss.getSheetByName('Inventory'), existing = {};
+  if (prods.length && inv.getLastRow() > 1) {
+    inv.getRange(2, 1, inv.getLastRow() - 1, 10).getValues().forEach(function (r) { if (r[0] !== '') existing[String(r[0])] = r; });
+  }
+  upsert(inv, 1, prods.map(function (p) {
+    var bc = String(p.barcode), old = existing[bc], total = totals[bc] || 0;
+    // Stock and price sync separately: the stock total is always updated, but name / price / cost / unit
+    // are only taken from a till whose edit (priceAt) is newer than the sheet's (column H).
+    var pAt = p.priceAt ? new Date(p.priceAt) : null;
+    var oldAt = old && old[7] ? new Date(old[7]) : null;
+    var takePrice = !old || (pAt && !isNaN(pAt) && (!oldAt || isNaN(oldAt) || pAt > oldAt));
+    if (!takePrice) return [bc, old[1], old[2], old[3], total, old[5], old[6], old[7], dev, old[9]];
     var margin = p.price ? Math.round(((p.price - (p.cost || 0)) / p.price) * 100) : 0;
-    return [String(p.barcode), p.name, afn(p.price), afn(p.cost), totals[String(p.barcode)] || 0, margin, p.quick ? 1 : 0, dt(p.updatedAt), dev, p.unit === 'kg' ? 'kg' : 'pc'];
+    return [bc, p.name, afn(p.price), afn(p.cost), total, margin, p.quick ? 1 : 0, pAt || dt(p.updatedAt), dev, p.unit === 'kg' ? 'kg' : 'pc'];
   }));
   upsert(ss.getSheetByName('Purchases'), 1, (b.receivings || []).map(function (r) {
     return [r.id, dt(r.timestamp), r.batchId, r.supplier, r.invoiceNo, String(r.barcode), r.name, r.unit === 'kg' ? r.qty + ' kg' : r.qty, afn(r.cost), afn(r.price), afn(r.qty * r.cost), r.userName, r.priceChanged ? 'Yes' : ''];

@@ -71,7 +71,9 @@ Version 1 is designed for **one device per shop**. Several tills can share a she
 - Every till's stock goes into its own row of the **Stock_By_Device** tab. The **Inventory** stock column is the sum over all tills, so tills never overwrite each other's numbers.
 - Starting stock typed into the sheet for a new product is handed to the first till that pulls products. Other tills start that product at 0, so it is not counted twice.
 - Give every device a different code (T1, T2 …) and do stock counts / corrections on one main device.
-- Pulling products never overwrites a product edited on the device but not yet synced. The manager sees both versions and chooses.
+- Stock and prices sync separately. Every till always reports its stock, but the sheet only takes a till's name / price / cost when that edit is newer than the sheet's (column *Price Updated*). Prices typed directly into the Inventory tab are time-stamped automatically. So a till that was offline cannot bring back an old price.
+- Pulling products never overwrites a price edited on the device but not yet sent. The manager sees both versions and chooses.
+- 🧪 Practice (sample) items are never sent to the sheet. Sales made with them are marked practice: they are left out of reports, shift totals and Google Sheets, and cannot be mixed with real items in one sale. «حذف اجناس نمونه» removes the items and the practice sales.
 - Re-sending is safe: every row is keyed by its receipt / shift / movement ID, so a retried upload updates the same row instead of adding a duplicate.
 
 Google Sheets is the **back-office report**, not a live shared database. Shared live stock across tills, with conflict handling for simultaneous edits, needs a real backend. That is the next step if shops run more than one till.

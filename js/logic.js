@@ -273,11 +273,33 @@ export function mergePulledProduct(cur, p, nowIso) {
     return { action: 'put', row: { barcode: String(p.barcode), ...sheet, stock: Math.max(0, Number(p.stock) || 0), quick: 0, updatedAt: nowIso, synced: 1 } };
   }
   const fields = PULL_FIELDS.filter((f) => (cur[f] ?? (f === 'unit' ? 'pc' : '')) !== sheet[f]);
-  if (cur.synced === 0) {
+  if (priceDirty(cur)) {
     return fields.length ? { action: 'conflict', fields, local: cur, sheet } : { action: 'same' };
   }
-  return { action: 'put', row: { ...cur, ...sheet, synced: 1 } };
+  // No unsent price edit: take the sheet's values. synced is kept, so a pending stock change is still sent.
+  return { action: 'put', row: { ...cur, ...sheet } };
 }
+
+// A name / price / cost / unit edit made on this device that the sheet has not confirmed yet.
+export function priceDirty(p) { return !!(p && p.priceAt && p.priceAt !== p.priceSentAt); }
+
+// Sets priceAt (the time of the last name / price / cost / unit edit) on a product about to be saved.
+// Stock-only changes keep the old priceAt, so the sheet never takes an old price from them.
+export function stampPrice(cur, next, ts) {
+  const changed = !cur || PULL_FIELDS.some((f) => (cur[f] ?? (f === 'unit' ? 'pc' : '')) !== (next[f] ?? (f === 'unit' ? 'pc' : '')));
+  return { ...next, priceAt: changed ? ts : cur.priceAt, priceSentAt: cur?.priceSentAt };
+}
+
+// Practice (🧪 sample) items and real items must not be in the same sale.
+export function cartMixError(cart, product) {
+  if (!cart.length || !!cart[0].demo === !!product.demo) return null;
+  return product.demo
+    ? 'این جنس نمونه (تمرینی) است — با اجناس واقعی در یک فروش یکجا نمی‌شود'
+    : 'سبد فروش تمرینی است (اجناس نمونه) — جنس واقعی را در فروش جداگانه بفروشید';
+}
+export function isPracticeSale(items) { return items.some((l) => l.demo); }
+// Sales that count: practice sales never reach reports, shift totals or Google Sheets.
+export function realSales(sales) { return sales.filter((s) => !s.practice); }
 
 // "۵ دقیقه پیش" style text for status lines (last sync, last backup).
 export function timeAgo(iso, nowMs = Date.now()) {

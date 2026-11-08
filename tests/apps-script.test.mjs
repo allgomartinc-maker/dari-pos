@@ -16,6 +16,7 @@ function fakeSheet(name) {
   });
   return {
     name, rows,
+    getName() { return name; },
     getRange(a, b, c, d) { return typeof a === 'string' ? range(1, 1) : range(a, b, c, d); },
     getLastRow() { return rows.length; },
     appendRow(r) { rows.push(r); },
@@ -49,7 +50,7 @@ function load() {
   vm.runInContext(readFileSync(new URL('../apps-script/Code.gs', import.meta.url), 'utf8'), ctx);
   ctx.setup();
   const call = (body) => JSON.parse(ctx.doPost({ postData: { contents: JSON.stringify(body) } }).text);
-  return { sheets, props, call };
+  return { sheets, props, call, ctx };
 }
 
 const sale = (voided = 0) => ({
@@ -161,4 +162,37 @@ test('older sheets without the Stock_By_Device tab get it created on push', () =
   assert.equal(call({ action: 'push', token: props.SYNC_TOKEN, deviceId: 'T1', products: [prod(4)] }).ok, true);
   assert.equal(sheets.Stock_By_Device.rows[0][0], 'Key');
   assert.equal(sheets.Inventory.rows[1][4], 4);
+});
+
+const priced = (o) => ({ barcode: '7000', name: 'شکر', price: 8000, cost: 6000, stock: 10, unit: 'pc', updatedAt: '2026-11-07T08:00:00Z', ...o });
+
+test('a stock-only push from an offline till does not overwrite a newer price in the sheet', () => {
+  const { sheets, props, call } = load();
+  const token = props.SYNC_TOKEN;
+  call({ action: 'push', token, deviceId: 'T1', products: [priced({ priceAt: '2026-11-07T08:00:00Z' })] });
+  call({ action: 'push', token, deviceId: 'T2', products: [priced({ price: 9000, priceAt: '2026-11-07T09:00:00Z', stock: 0 })] }); // T2 raises the price
+  call({ action: 'push', token, deviceId: 'T1', products: [priced({ priceAt: '2026-11-07T08:00:00Z', stock: 7, updatedAt: '2026-11-07T10:00:00Z' })] }); // T1 sold 3, old price
+  const row = sheets.Inventory.rows.find((r) => r[0] === '7000');
+  assert.equal(row[2], 90);  // T2's newer price survives
+  assert.equal(row[4], 7);   // stock total still updated: T1 7 + T2 0
+});
+
+test('a newer price edit from a till does replace the sheet price', () => {
+  const { sheets, props, call } = load();
+  const token = props.SYNC_TOKEN;
+  call({ action: 'push', token, deviceId: 'T1', products: [priced({ priceAt: '2026-11-07T08:00:00Z' })] });
+  call({ action: 'push', token, deviceId: 'T1', products: [priced({ price: 8500, priceAt: '2026-11-07T11:00:00Z' })] });
+  assert.equal(sheets.Inventory.rows.find((r) => r[0] === '7000')[2], 85);
+});
+
+test('editing a price directly in the sheet stamps it, so an older till edit cannot overwrite it', () => {
+  const { sheets, props, call, ctx } = load();
+  const token = props.SYNC_TOKEN;
+  call({ action: 'push', token, deviceId: 'T1', products: [priced({ priceAt: '2026-01-01T08:00:00Z' })] });
+  const r = sheets.Inventory.rows.findIndex((x) => x[0] === '7000') + 1;
+  sheets.Inventory.rows[r - 1][2] = 95; // owner types a new price
+  ctx.onEdit({ range: { getSheet: () => sheets.Inventory, getRow: () => r, getLastRow: () => r, getColumn: () => 3, getLastColumn: () => 3 } });
+  // Till edit newer than the first push but made before the owner's sheet edit (which is stamped "now").
+  call({ action: 'push', token, deviceId: 'T1', products: [priced({ price: 8200, priceAt: '2026-02-01T09:00:00Z' })] });
+  assert.equal(sheets.Inventory.rows[r - 1][2], 95);
 });
