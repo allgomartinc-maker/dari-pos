@@ -309,3 +309,9 @@ html { touch-action: manipulation; }
 .check-table td:first-child { color: var(--muted); width: 40%; }
 .multi-note { background: var(--surface-2); border-radius: 12px; padding: 8px 12px; }
 .multi-note summary { cursor: pointer; font-weight: 700; }
+.install-card { margin-top: 14px; text-align: start; background: var(--ok-bg); border: 2px solid var(--primary-2); border-radius: var(--radius); padding: 12px 14px; }
+.install-card p, .install-card ol { margin: 6px 0; }
+.install-card ol { padding-inline-start: 20px; }
+.ios-share { display: inline-block; border: 1.5px solid currentColor; border-radius: 6px; padding: 0 5px; font-weight: 800; }
+.warn-text { color: var(--warn); font-weight: 700; }
+.setup .install-card { margin: 0 0 6px; }

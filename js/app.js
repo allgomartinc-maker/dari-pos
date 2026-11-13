@@ -2,7 +2,7 @@
 import {
   formatMoney, formatNumber, parseMoney, parseIntSafe, toDariDigits, cartTotals, changeDue, marginPct, QUICK_CASH,
   AFN_DENOMS, countDenoms, shiftExpected, varianceStatus, makeReceiptId, parseReceiptQr, eanValid, normalizeBarcode, looksLikeBarcode,
-  randomId, internalBarcode, toCsv, parseCsv, dariDate, timeAgo, backupDue, stampPrice, cartMixError, isPracticeSale, realSales, parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount, round3
+  randomId, internalBarcode, toCsv, parseCsv, dariDate, timeAgo, backupDue, stampPrice, cartMixError, isPracticeSale, realSales, installMode, parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount, round3
 } from './logic.js';
 import {
   db, getSettings, setSetting, nextSeq, createUser, setUserPin, findUserByPin, pinInUse, openShift, pendingCount,
@@ -35,6 +35,46 @@ async function requireAdmin(reason) {
 }
 
 // ====================================================================== boot
+// ---------- free install to the home screen ----------
+let installPrompt = null, installedNow = false;
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; refreshInstallBoxes(); });
+window.addEventListener('appinstalled', () => { installPrompt = null; installedNow = true; refreshInstallBoxes(); toast('اپ روی صفحه اصلی نصب شد ✔', 'ok'); });
+const isStandalone = () => window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+const currentInstallMode = () => installMode({ ua: navigator.userAgent, standalone: isStandalone(), canPrompt: !!installPrompt, touch: navigator.maxTouchPoints || 0 });
+
+// Card that tells the shop how to put the app on the home screen (hidden once installed).
+function installCardHtml() {
+  const mode = currentInstallMode();
+  if (mode === 'installed') return '';
+  if (installedNow) return `<div class="install-card"><b>✔ نصب شد</b><p class="small">از این به بعد اپ را از آیکن «صندوق دری» روی صفحه اصلی باز کنید.</p></div>`;
+  if (mode === 'prompt') {
+    return `<div class="install-card"><b>📲 نصب رایگان روی صفحه اصلی</b>
+      <p class="small">یک بار نصب کنید؛ بعد مثل اپ باز می‌شود و بدون انترنت کار می‌کند.</p>
+      <button class="btn primary block" type="button" data-install>نصب اپ (رایگان)</button></div>`;
+  }
+  if (mode === 'ios') {
+    return `<div class="install-card"><b>📲 نصب رایگان روی آیفون / آیپد</b>
+      <ol class="small"><li>در <b>Safari</b> دکمه اشتراک <span class="ios-share" aria-hidden="true">⬆︎</span> را بزنید (پایین یا بالای صفحه).</li>
+      <li>پایین بروید و <b>Add to Home Screen</b> (افزودن به صفحه اصلی) را بزنید.</li>
+      <li><b>Add</b> را بزنید. از این به بعد اپ را از آیکن «صندوق دری» باز کنید.</li></ol>
+      <p class="small warn-text">⚠️ تا نصب نکنید، آیفون ممکن است اطلاعات فروش را بعد از ۷ روز استفاده نکردن پاک کند.</p></div>`;
+  }
+  return `<div class="install-card"><b>📲 نصب رایگان روی صفحه اصلی</b>
+    <p class="small">منوی مرورگر <b>⋮</b> را باز کنید و <b>Install app</b> یا <b>Add to Home screen</b> (افزودن به صفحه اصلی) را بزنید.</p></div>`;
+}
+function fillInstallBox(el) {
+  if (!el) return;
+  el.innerHTML = installCardHtml();
+  el.querySelector('[data-install]')?.addEventListener('click', async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    try { if ((await installPrompt.userChoice).outcome === 'accepted') installedNow = true; } catch { /* ignore */ }
+    installPrompt = null;
+    refreshInstallBoxes();
+  });
+}
+function refreshInstallBoxes() { document.querySelectorAll('.install-box').forEach(fillInstallBox); }
+
 async function boot() {
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
   requestPersistentStorage();
@@ -123,6 +163,7 @@ async function refreshBadge() {
 function renderSetup() {
   $('#topbar').classList.add('hidden');
   $('#main').innerHTML = `<div class="center-screen"><form class="card setup stack" id="setupForm">
+    <div class="install-box"></div>
     <h2>راه‌اندازی صندوق</h2>
     <p class="muted">این تنظیمات فقط یک بار انجام می‌شود. همه اطلاعات در همین دستگاه ذخیره می‌شود و بدون انترنت کار می‌کند.</p>
     <label class="field">نام فروشگاه<input name="storeName" required value="فروشگاه من"></label>
@@ -135,6 +176,7 @@ function renderSetup() {
     <label class="check"><input type="checkbox" name="sample"> 🧪 افزودن اجناس نمونه برای تمرین (قبل از فروش واقعی حذف شود)</label>
     <button class="btn primary big" type="submit">شروع</button>
   </form></div>`;
+  refreshInstallBoxes();
   $('#setupForm').onsubmit = async (e) => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
@@ -193,9 +235,11 @@ function renderLock() {
     <h2>${esc(state.s.storeName)}</h2><p class="muted">رمز خود را وارد کنید</p>
     <div class="pin-dots"></div>${keypadHtml()}
     <button class="btn primary block" data-k="E" style="margin-top:8px">ورود</button>
-    <div class="muted small app-ver" id="appVer"></div>
+    <div class="muted small app-ver" id="appVer">نسخه رایگان</div>
+    <div class="install-box"></div>
   </div></div>`;
-  appVersion().then((v) => { const el = $('#appVer'); if (el && v) el.textContent = `نسخه ${v}`; });
+  appVersion().then((v) => { const el = $('#appVer'); if (el && v) el.textContent = `نسخه رایگان ${v}`; });
+  refreshInstallBoxes();
   bindPinPad($('.lock'), async (pin) => {
     if (Date.now() < lockedUntil) return toast('چند بار رمز اشتباه شد. ۳۰ ثانیه صبر کنید.', 'err');
     const u = await findUserByPin(pin);
@@ -1065,7 +1109,8 @@ async function renderSettings() {
   const persisted = navigator.storage?.persisted ? await navigator.storage.persisted() : false;
   $('#main').innerHTML = `<div class="stack">
     <form class="card stack" id="sf"><h2>⚙️ تنظیمات فروشگاه</h2>
-      <div class="muted small">نسخه برنامه: <b class="ltr">${esc(await appVersion() || '—')}</b> · اسکنر: <b class="ltr">${esc(decoderName || '—')}</b></div>
+      <div class="muted small">نسخه رایگان: <b class="ltr">${esc(await appVersion() || '—')}</b> · اسکنر: <b class="ltr">${esc(decoderName || '—')}</b> · ${isStandalone() ? '✔ نصب شده' : '✖ نصب نشده'}</div>
+      <div class="install-box"></div>
       <div class="grid2">
         <label class="field">نام فروشگاه<input name="storeName" value="${esc(s.storeName)}"></label>
         <label class="field">آدرس<input name="storeAddress" value="${esc(s.storeAddress)}"></label>
@@ -1106,6 +1151,7 @@ async function renderSettings() {
       <p class="muted small">ذخیره دائمی دستگاه: ${persisted ? '✔ فعال' : '✖ فعال نیست — اپ را نصب کنید (Add to Home Screen)'} · هر روز پس از بستن شفت پشتیبان بگیرید و فایل را در فلش، واتساپ یا ایمیل خود نگه دارید.</p>
       <div class="row"><button class="btn" id="backup">دانلود پشتیبان کامل (JSON)</button><button class="btn" id="restore">بازیابی از پشتیبان</button></div></div>
   </div>`;
+  refreshInstallBoxes();
   $('#sf').onsubmit = async (e) => {
     e.preventDefault();
     const f = new FormData(e.target);

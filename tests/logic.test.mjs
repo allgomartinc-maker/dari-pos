@@ -4,7 +4,7 @@ import {
   toLatinDigits, toDariDigits, parseMoney, formatMoney, cartTotals, changeDue,
   marginPct, countDenoms, AFN_DENOMS, shiftExpected, varianceStatus, hashPin,
   makeReceiptId, receiptQr, parseReceiptQr, eanValid, normalizeBarcode, looksLikeBarcode,
-  packRaster, csvEscape, toCsv, parseCsv, applySaleToStock, mergePulledProduct, timeAgo, backupDue, stampPrice, cartMixError, isPracticeSale, realSales
+  packRaster, csvEscape, toCsv, parseCsv, applySaleToStock, mergePulledProduct, timeAgo, backupDue, stampPrice, cartMixError, isPracticeSale, realSales, installMode
 } from '../js/logic.js';
 
 test('digit conversion handles Persian, Arabic-Indic and Latin', () => {
@@ -285,4 +285,16 @@ test('practice sales: a cart is all practice items or all real items, and practi
   assert.equal(isPracticeSale([{ demo: 1 }]), true);
   assert.equal(isPracticeSale([{ barcode: 'x' }]), false);
   assert.deepEqual(realSales([{ id: 1 }, { id: 2, practice: 1 }]).map((x) => x.id), [1]);
+});
+
+test('installMode: picks the right "add to home screen" help for each phone', () => {
+  const iphone = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1';
+  const ipad13 = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15';
+  const android = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36';
+  assert.equal(installMode({ ua: android, standalone: true, canPrompt: true }), 'installed');
+  assert.equal(installMode({ ua: android, standalone: false, canPrompt: true }), 'prompt');
+  assert.equal(installMode({ ua: iphone, standalone: false, canPrompt: false }), 'ios');
+  assert.equal(installMode({ ua: ipad13, standalone: false, canPrompt: false, touch: 5 }), 'ios'); // iPad pretends to be a Mac
+  assert.equal(installMode({ ua: ipad13, standalone: false, canPrompt: false, touch: 0 }), 'manual'); // a real Mac
+  assert.equal(installMode({ ua: android, standalone: false, canPrompt: false }), 'manual');
 });

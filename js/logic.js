@@ -316,3 +316,15 @@ export function backupDue({ lastBackupAt, salesSince }, nowMs = Date.now()) {
   if (!salesSince) return false;
   return !lastBackupAt || nowMs - Date.parse(lastBackupAt) > 24 * 3600 * 1000;
 }
+
+// Which "add to home screen" help to show:
+//  installed → already opened from the home-screen icon
+//  prompt    → browser offers a one-tap install (Android Chrome, Edge, desktop Chrome)
+//  ios       → iPhone / iPad: Share button → Add to Home Screen (iPadOS reports itself as a Mac with touch)
+//  manual    → anything else: browser menu → Install / Add to Home screen
+export function installMode({ ua = '', standalone = false, canPrompt = false, touch = 0 }) {
+  if (standalone) return 'installed';
+  if (canPrompt) return 'prompt';
+  if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && touch > 1)) return 'ios';
+  return 'manual';
+}
