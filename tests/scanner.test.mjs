@@ -30,3 +30,32 @@ test('cleanFrame output is grey and opaque', () => {
     assert.equal(img.data[i + 3], 255);
   }
 });
+
+import { makeScanGate } from '../js/scanner.js';
+
+test('scan gate: a known product is accepted on the first read', () => {
+  const gate = makeScanGate();
+  assert.equal(gate('4006381333931', 0, true), 'accept');
+});
+
+test('scan gate: an unknown code needs two reads before it is accepted (one-off misreads are ignored)', () => {
+  const gate = makeScanGate();
+  assert.equal(gate('4006381333932', 0, false), 'wait');      // misread seen once
+  assert.equal(gate('4006381333931', 40, true), 'accept');    // the real item wins
+  assert.equal(gate('9999999999994', 100, false), 'wait');
+  assert.equal(gate('9999999999994', 160, false), 'accept');  // genuinely new item: confirmed by a 2nd read
+});
+
+test('scan gate: votes expire, so two misreads far apart do not add up', () => {
+  const gate = makeScanGate({ windowMs: 1200 });
+  assert.equal(gate('1111111111116', 0, false), 'wait');
+  assert.equal(gate('1111111111116', 5000, false), 'wait');
+});
+
+test('scan gate: the same item held in view counts once until it leaves for 1.5 s', () => {
+  const gate = makeScanGate();
+  assert.equal(gate('4006381333931', 0, true), 'accept');
+  assert.equal(gate('4006381333931', 500, true), 'repeat');
+  assert.equal(gate('4006381333931', 1900, true), 'repeat');  // still in view (last seen 500 → 1900 < 1.5 s apart)
+  assert.equal(gate('4006381333931', 3500, true), 'accept');  // gone for 1.6 s, scanned again = second item
+});

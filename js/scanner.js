@@ -48,21 +48,47 @@ export function initWedge() {
 // html5-qrcode's own live loop is not used: it shrank frames to the on-screen box (~350px on a phone),
 // squeezing each bar to ~1px, which is why scanning used to be slow.
 let cam = null;  // { stream, track, video, stopped, timer }
-let lastCode = '', lastAt = 0;
 export let decoderName = '';
-const NATIVE_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'code_39', 'itf', 'qr_code'];
-const WASM_FORMATS = ['EAN13', 'EAN8', 'UPCA', 'UPCE', 'Code128', 'Code39', 'ITF', 'QRCode'];
+// ITF and Code 39 are left out on purpose: they have weak or no check digits, are not used on shop goods,
+// and are the usual source of "phantom" codes when the camera sees half a barcode.
+const NATIVE_FORMATS = ['ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_128', 'qr_code'];
+const WASM_FORMATS = ['EAN13', 'EAN8', 'UPCA', 'UPCE', 'Code128', 'QRCode'];
 const VIDEO = { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 }, advanced: [{ focusMode: 'continuous' }] };
 const CROP_W = 0.9, CROP_H = 0.5; // centre strip (matches the white guide box) at full HD: far barcodes need ~2px per bar
 const ZOOM = 2; // 2x zoom: hold the phone ~25 cm away, where phone cameras can focus sharply
 
-function emit(text, onCode) {
+/**
+ * Decides whether a camera read becomes a scan:
+ *  'accept' → use it; 'wait' → unknown code seen once, wait for a second matching read; 'repeat' → same item still in view.
+ * A known product is accepted at once (a misread almost never lands on another real product). An unknown code must be
+ * read `confirm` times within `windowMs`, so a one-off misread of a blurry or half-visible barcode never pops up
+ * "not found". The same item counts once until it has been out of view for `repeatMs`.
+ */
+export function makeScanGate({ confirm = 2, windowMs = 1200, repeatMs = 1500 } = {}) {
+  let last = '', lastAt = -Infinity;
+  const votes = new Map();
+  return (code, now, known) => {
+    if (code === last && now - lastAt < repeatMs) { lastAt = now; return 'repeat'; }
+    if (!known) {
+      const v = votes.get(code);
+      const n = v && now - v.at < windowMs ? v.n + 1 : 1;
+      votes.set(code, { n, at: now });
+      if (n < confirm) return 'wait';
+    }
+    votes.clear();
+    last = code; lastAt = now;
+    return 'accept';
+  };
+}
+
+let gate = makeScanGate();
+async function emit(text, onCode, isKnown) {
   const code = normalizeBarcode(text);
-  const now = Date.now();
-  // Same code still in view counts once; any dialog open (not-found, weight, add product) pauses the camera.
-  const repeat = code === lastCode && now - lastAt < 1500;
-  lastCode = code; lastAt = now;
-  if (repeat || document.querySelector('.modal-back')) return;
+  // Any dialog open (not-found, weight, add product) pauses the camera.
+  if (document.querySelector('.modal-back')) return;
+  let known = false;
+  try { known = isKnown ? !!(await isKnown(code)) : false; } catch { /* treat as unknown */ }
+  if (gate(code, Date.now(), known) !== 'accept') return;
   if (navigator.vibrate) navigator.vibrate(40);
   onCode(code, 'camera');
 }
@@ -157,7 +183,7 @@ function jsDecoder() {
   document.body.appendChild(holder);
   const zx = new window.Html5Qrcode('zxingHolder', {
     verbose: false,
-    formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.CODE_39, F.ITF, F.QR_CODE],
+    formatsToSupport: [F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E, F.CODE_128, F.QR_CODE],
     experimentalFeatures: { useBarCodeDetectorIfSupported: false }
   });
   const crop = cropper();
@@ -225,8 +251,10 @@ async function setupControls(box, track, signal) {
   }
 }
 
-export async function startCamera(elementId, onCode) {
+// opts.isKnown(code) → true when the code is a product (or receipt) this device already has.
+export async function startCamera(elementId, onCode, opts = {}) {
   await stopCamera();
+  gate = makeScanGate();
   const box = document.getElementById(elementId);
   const [decode, stream] = await Promise.all([makeDecoder(), navigator.mediaDevices.getUserMedia({ video: VIDEO, audio: false })]);
   const track = stream.getVideoTracks()[0];
@@ -245,7 +273,7 @@ export async function startCamera(elementId, onCode) {
     if (c.stopped) return;
     const t0 = performance.now();
     if (video.readyState >= 2 && video.videoWidth) {
-      try { const text = await decode(video); if (text && !c.stopped) emit(text, onCode); } catch { /* frame not ready */ }
+      try { const text = await decode(video); if (text && !c.stopped) await emit(text, onCode, opts.isKnown); } catch { /* frame not ready */ }
     }
     if (!c.stopped) c.timer = setTimeout(tick, Math.max(15, Math.min(300, performance.now() - t0)));
   };

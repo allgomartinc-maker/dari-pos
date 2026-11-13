@@ -299,7 +299,9 @@ async function toggleCamera(boxId, handler, btn) {
   if (cameraActive()) { await stopCamera(); box.classList.add('hidden'); btn.textContent = '📷 کمره'; return; }
   box.classList.remove('hidden');
   btn.textContent = '✖ بستن کمره';
-  try { await startCamera(boxId, handler); }
+  // Known products / receipt QRs are accepted at once; unknown codes must be read twice (stops misread "not found").
+  const isKnown = async (c) => !!parseReceiptQr(c) || !!(await db.products.get(c));
+  try { await startCamera(boxId, handler, { isKnown }); }
   catch (err) {
     box.classList.add('hidden'); btn.textContent = '📷 کمره';
     toast('کمره باز نشد: اجازه کمره را بدهید (فقط روی HTTPS یا localhost کار می‌کند)', 'err');
