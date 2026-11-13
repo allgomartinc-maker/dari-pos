@@ -64,21 +64,32 @@ const ZOOM = 2; // 2x zoom: hold the phone ~25 cm away, where phone cameras can 
  * read `confirm` times within `windowMs`, so a one-off misread of a blurry or half-visible barcode never pops up
  * "not found". The same item counts once until it has been out of view for `repeatMs`.
  */
-export function makeScanGate({ confirm = 2, windowMs = 1200, repeatMs = 1500 } = {}) {
+export function makeScanGate({ confirm = 3, windowMs = 1500, repeatMs = 1500 } = {}) {
   let last = '', lastAt = -Infinity;
   const votes = new Map();
   return (code, now, known) => {
     if (code === last && now - lastAt < repeatMs) { lastAt = now; return 'repeat'; }
     if (!known) {
-      const v = votes.get(code);
-      const n = v && now - v.at < windowMs ? v.n + 1 : 1;
+      for (const [k, v] of votes) if (now - v.at >= windowMs) votes.delete(k); // forget old reads
+      const n = (votes.get(code)?.n || 0) + 1;
       votes.set(code, { n, at: now });
-      if (n < confirm) return 'wait';
+      // Unknown codes must be read `confirm` times AND lead any other number seen for the same item by 2,
+      // so a consistent misread (e.g. pale bars not seen) cannot win against the real code.
+      const rival = Math.max(0, ...[...votes].filter(([k]) => k !== code).map(([, v]) => v.n));
+      if (n < confirm || n < rival + 2) return 'wait';
     }
     votes.clear();
     last = code; lastAt = now;
     return 'accept';
   };
+}
+
+// The same UPC-A product can arrive as 12 digits (UPC-A) or 13 digits with a leading 0 (EAN-13),
+// depending on the phone, the decoder or a hand scanner. Returns the code first, then its other form.
+export function upcVariants(code) {
+  if (/^\d{12}$/.test(code)) return [code, '0' + code];
+  if (/^0\d{12}$/.test(code)) return [code, code.slice(1)];
+  return [code];
 }
 
 let gate = makeScanGate();
@@ -114,7 +125,14 @@ async function nativeDecoder() {
     if (!formats.includes('ean_13')) return null;
     const det = new window.BarcodeDetector({ formats });
     const crop = cropper();
-    return async (video) => { const r = await det.detect(crop(video).canvas); return r[0]?.rawValue || null; };
+    let frame = 0;
+    // Every other frame gets the paper-white cut, so two-tone bars (cans) read on Android too.
+    return async (video) => {
+      const { canvas, ctx } = crop(video);
+      const src = frame++ % 2 ? paperCut(ctx.getImageData(0, 0, canvas.width, canvas.height)) : canvas;
+      const r = await det.detect(src);
+      return r[0]?.rawValue || null;
+    };
   } catch { return null; }
 }
 
@@ -139,14 +157,26 @@ async function wasmDecoder() {
   try {
     const Z = await loadWasm();
     const crop = cropper();
-    const opts = { formats: WASM_FORMATS, maxNumberOfSymbols: 1, tryHarder: true, tryRotate: false, tryInvert: false, tryDownscale: true };
+    const base = { formats: WASM_FORMATS, maxNumberOfSymbols: 1, tryRotate: false, tryInvert: false };
+    // Three passes in turn, so each look at the item is different:
+    //  0: raw frame, quick settings      → fastest read of a clear barcode
+    //  1: red channel + contrast         → blue / two-tone bars, coloured packs (like a red-laser scanner)
+    //  2: red channel + smoothing        → dim shop, grainy old camera
+    //  3: paper-white cut                → two-tone bars (dark + pale), e.g. drink cans
+    const passes = [
+      { opts: { ...base, tryHarder: false, tryDownscale: true } },
+      { opts: { ...base, tryHarder: true, tryDownscale: true }, clean: { smooth: false } },
+      { opts: { ...base, tryHarder: true, tryDownscale: true }, clean: { smooth: true } },
+      { opts: { ...base, tryHarder: true, tryDownscale: true }, paper: true }
+    ];
     let frame = 0;
-    // Alternate frames: raw (best for sharp / far barcodes) and cleaned (best for dim shops and grainy cameras).
     return async (video) => {
+      const pass = passes[frame++ % passes.length];
       const { canvas, ctx } = crop(video);
       const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-      if (frame++ % 2) cleanFrame(img);
-      const r = await Z.readBarcodes(img, opts);
+      if (pass.clean) cleanFrame(img, pass.clean);
+      if (pass.paper) paperCut(img);
+      const r = await Z.readBarcodes(img, pass.opts);
       return r.find((x) => x.isValid)?.text || null;
     };
   } catch { return null; }
@@ -154,24 +184,44 @@ async function wasmDecoder() {
 
 // In place: grey, 3x3 smoothing (removes sensor noise), then stretch contrast so dim bars become black/white.
 // Plain JS because canvas filters are missing on older iPhones.
-export function cleanFrame(img) {
+// channel 'red' (default) = what a red-laser shop scanner sees: blue / black ink is dark, while white, yellow and
+// orange packaging stays light. channel 'luma' = normal grey. smooth = 3x3 blur against sensor noise.
+export function cleanFrame(img, { smooth = true, channel = 'red' } = {}) {
   const { data, width: w, height: h } = img;
   const n = w * h, g = new Float32Array(n), t = new Float32Array(n);
-  for (let i = 0; i < n; i++) g[i] = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2];
-  for (let y = 0; y < h; y++) {
-    const r = y * w;
-    for (let x = 0; x < w; x++) t[r + x] = (g[r + Math.max(0, x - 1)] + g[r + x] + g[r + Math.min(w - 1, x + 1)]) / 3;
-  }
+  if (channel === 'luma') for (let i = 0; i < n; i++) g[i] = 0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2];
+  else for (let i = 0; i < n; i++) g[i] = data[i * 4];
   const hist = new Uint32Array(256);
-  for (let y = 0; y < h; y++) {
-    const up = Math.max(0, y - 1) * w, dn = Math.min(h - 1, y + 1) * w, r = y * w;
-    for (let x = 0; x < w; x++) { const v = (t[up + x] + t[r + x] + t[dn + x]) / 3; g[r + x] = v; hist[v | 0]++; }
+  if (smooth) {
+    for (let y = 0; y < h; y++) {
+      const r = y * w;
+      for (let x = 0; x < w; x++) t[r + x] = (g[r + Math.max(0, x - 1)] + g[r + x] + g[r + Math.min(w - 1, x + 1)]) / 3;
+    }
+    for (let y = 0; y < h; y++) {
+      const up = Math.max(0, y - 1) * w, dn = Math.min(h - 1, y + 1) * w, r = y * w;
+      for (let x = 0; x < w; x++) g[r + x] = (t[up + x] + t[r + x] + t[dn + x]) / 3;
+    }
   }
+  for (let i = 0; i < n; i++) hist[Math.min(255, Math.max(0, g[i])) | 0]++;
   let lo = 0, hi = 255, acc = 0;
   for (; lo < 255; lo++) { acc += hist[lo]; if (acc > n * 0.02) break; }
   for (acc = 0; hi > 0; hi--) { acc += hist[hi]; if (acc > n * 0.02) break; }
   const k = hi > lo ? 255 / (hi - lo) : 1;
   for (let i = 0; i < n; i++) { const v = (g[i] - lo) * k; data[i * 4] = data[i * 4 + 1] = data[i * 4 + 2] = v; data[i * 4 + 3] = 255; }
+  return img;
+}
+
+// In place, red channel: everything noticeably darker than the paper white becomes a black bar.
+// Two-tone barcodes (dark + pale bars, common on cans) only read this way: normal grey leaves the pale bars mid-grey.
+export function paperCut(img, frac = 0.2) {
+  const d = img.data, n = d.length / 4, hist = new Uint32Array(256);
+  for (let i = 0; i < d.length; i += 4) hist[d[i]]++;
+  let acc = 0, ink = 0, paper = 255;
+  for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc > n * 0.02) { ink = v; break; } }
+  acc = 0;
+  for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc > n * 0.10) { paper = v; break; } }
+  const cut = paper - frac * (paper - ink);
+  for (let i = 0; i < d.length; i += 4) { const v = d[i] < cut ? 0 : 255; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255; }
   return img;
 }
 
@@ -267,15 +317,15 @@ export async function startCamera(elementId, onCode, opts = {}) {
   const c = cam = { stream, track, video, box, stopped: false, timer: 0, ac: new AbortController() };
   await video.play();
   setupControls(box, track, c.ac.signal).catch(() => {});
-  // Each decode finishes before the next starts; the pause after it is as long as the decode took,
-  // so a slow phone spends at most about half its time scanning and buttons stay responsive.
+  // Each decode finishes before the next starts; the pause after it is half as long as the decode took,
+  // so a slow phone scans about two thirds of the time and buttons stay responsive.
   const tick = async () => {
     if (c.stopped) return;
     const t0 = performance.now();
     if (video.readyState >= 2 && video.videoWidth) {
       try { const text = await decode(video); if (text && !c.stopped) await emit(text, onCode, opts.isKnown); } catch { /* frame not ready */ }
     }
-    if (!c.stopped) c.timer = setTimeout(tick, Math.max(15, Math.min(300, performance.now() - t0)));
+    if (!c.stopped) c.timer = setTimeout(tick, Math.max(10, Math.min(150, (performance.now() - t0) / 2)));
   };
   tick();
 }

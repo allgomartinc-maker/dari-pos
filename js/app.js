@@ -10,7 +10,7 @@ import {
 } from './db.js';
 import { syncNow, startAutoSync, onSyncChange, pullUsers, pullProducts, takeSheetVersion, keepLocalVersion } from './sync.js';
 import { receiptDoc, zReportDoc, labelDoc, printHtml, printBluetooth, connectBluetooth, bluetoothSupported, bluetoothName } from './print.js';
-import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep, warmUpScanner, decoderName } from './scanner.js';
+import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep, warmUpScanner, decoderName, upcVariants } from './scanner.js';
 import { $, $$, esc, toast, modal, confirmBox, formBox, keypadHtml, bindPinPad, askPin, download, pickFile } from './ui.js';
 
 // On screen the word «افغانی» is drawn small after the number; plain text (toasts, confirms, receipts) uses formatMoney.
@@ -300,7 +300,7 @@ async function toggleCamera(boxId, handler, btn) {
   box.classList.remove('hidden');
   btn.textContent = '✖ بستن کمره';
   // Known products / receipt QRs are accepted at once; unknown codes must be read twice (stops misread "not found").
-  const isKnown = async (c) => !!parseReceiptQr(c) || !!(await db.products.get(c));
+  const isKnown = async (c) => !!parseReceiptQr(c) || !!(await findProduct(c));
   try { await startCamera(boxId, handler, { isKnown }); }
   catch (err) {
     box.classList.add('hidden'); btn.textContent = '📷 کمره';
@@ -398,7 +398,7 @@ async function registerCode(code) {
   const r = parseReceiptQr(code);
   if (r) return showReceipt(r.receiptId);
   if (!looksLikeBarcode(code)) return registerByName(code);
-  const p = await db.products.get(code);
+  const p = await findProduct(code);
   if (!p) {
     beep('err');
     if (!eanValid(code)) return toast('بارکد درست خوانده نشد، دوباره اسکن کنید', 'err');
@@ -422,6 +422,12 @@ async function registerCode(code) {
   drawCart();
 }
 
+// Finds a product by scanned code, also trying the other UPC-A / EAN-13 form (12 vs 13 digits).
+async function findProduct(code) {
+  for (const v of upcVariants(code)) { const p = await db.products.get(v); if (p) return p; }
+  return null;
+}
+
 // Enter pressed on a typed name: one match → add it; several → show the list; none → offer to add.
 async function registerByName(q) {
   const name = q.trim();
@@ -437,6 +443,7 @@ function notFound({ barcode = '', name = '' }) {
   modal(`<div class="nf"><div class="nf-icon">🔍</div><h2>جنس پیدا نشد</h2>
     <p class="muted">این جنس هنوز در سیستم ثبت نیست:</p>
     <div class="nf-what">${barcode ? `<span class="ltr">${esc(barcode)}</span>` : `«${esc(name)}»`}</div>
+    ${barcode ? '<p class="small muted">این عدد را با عدد زیر خط‌های بارکد روی جنس مقایسه کنید. اگر فرق دارد، «بستن» را بزنید و دوباره آرام اسکن کنید.</p>' : ''}
     <div class="actions"><button class="btn primary big grow" data-add>➕ اضافه کردن جنس</button><button class="btn big" data-no>بستن</button></div></div>`, {
     dismiss: false,
     onMount: (box, close) => {
@@ -833,7 +840,8 @@ async function getSetting2(k) { return (await getSettings())[k]; }
 async function receiveCode(code) {
   if (!state.batch) return;
   if (!eanValid(code)) { beep('err'); return toast('بارکد درست خوانده نشد، دوباره اسکن کنید', 'err'); }
-  const p = await db.products.get(code);
+  const p = await findProduct(code);
+  if (p) code = p.barcode; // same product saved under the other UPC / EAN form
   beep(p ? 'ok' : 'new');
   const card = $('#itemCard');
   card.classList.remove('hidden');
@@ -1033,7 +1041,7 @@ function editProduct(p, after, { isNew = !p.name } = {}) {
       f.onsubmit = async (e) => {
         e.preventDefault();
         const bc = normalizeBarcode(f.barcode.value);
-        if (isNew && (await db.products.get(bc))) return toast('این بارکد قبلاً ثبت شده است', 'err');
+        if (isNew && (await findProduct(bc))) return toast('این بارکد قبلاً ثبت شده است', 'err');
         const unit = f.unit.value === 'kg' ? 'kg' : 'pc';
         const cur = await db.products.get(bc), ts = now();
         await db.products.put(stampPrice(cur, { barcode: bc, name: f.name.value.trim(), price: parseMoney(f.price.value), cost: parseMoney(f.cost.value), unit,
