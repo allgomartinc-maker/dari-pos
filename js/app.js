@@ -12,20 +12,21 @@ import { syncNow, startAutoSync, onSyncChange, pullUsers, pullProducts, takeShee
 import { receiptDoc, zReportDoc, labelDoc, printHtml, printBluetooth, connectBluetooth, bluetoothSupported, bluetoothName } from './print.js';
 import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep, warmUpScanner, decoderName, upcVariants } from './scanner.js';
 import { $, $$, esc, toast, modal, confirmBox, formBox, keypadHtml, bindPinPad, askPin, download, pickFile } from './ui.js';
+import { icon } from './icons.js';
 
 // On screen the word «افغانی» is drawn small after the number; plain text (toasts, confirms, receipts) uses formatMoney.
 const m = (p) => `${formatNumber(p)} <small class="cur">افغانی</small>`;
 const now = () => new Date().toISOString();
 const state = { user: null, s: null, view: 'register', cart: [], tendered: '', batch: null, item: null };
 
-// [id, icon + label, role, short label for the phone tab bar]
+// [id, label, role, short label for the phone tab bar, icon]
 const VIEWS = [
-  ['register', '🛒 فروش', 'cashier', 'فروش'],
-  ['shift', '💵 شفت', 'cashier', 'شفت'],
-  ['receive', '📦 دریافت جنس', 'admin', 'دریافت'],
-  ['products', '🏷️ اجناس', 'admin', 'اجناس'],
-  ['reports', '📊 گزارش‌ها', 'admin', 'گزارش'],
-  ['settings', '⚙️ تنظیمات', 'admin', 'تنظیمات']
+  ['register', 'فروش', 'cashier', 'فروش', 'cart'],
+  ['shift', 'شفت', 'cashier', 'شفت', 'cash'],
+  ['receive', 'دریافت جنس', 'admin', 'دریافت', 'box'],
+  ['products', 'اجناس', 'admin', 'اجناس', 'tag'],
+  ['reports', 'گزارش‌ها', 'admin', 'گزارش', 'chart'],
+  ['settings', 'تنظیمات', 'admin', 'تنظیمات', 'gear']
 ];
 const isAdmin = () => state.user?.role === 'admin';
 
@@ -232,6 +233,7 @@ function renderLock() {
   state.user = null;
   $('#topbar').classList.add('hidden');
   $('#main').innerHTML = `<div class="center-screen"><div class="card lock">
+    <div class="lock-mark" aria-hidden="true">؋</div>
     <h2>${esc(state.s.storeName)}</h2><p class="muted">رمز خود را وارد کنید</p>
     <div class="pin-dots"></div>${keypadHtml()}
     <button class="btn primary block" data-k="E" style="margin-top:8px">ورود</button>
@@ -262,10 +264,7 @@ function renderShell() {
   $('#storeTitle').textContent = state.s.storeName;
   $('#userChip').textContent = `${state.user.name} · ${isAdmin() ? 'مدیر' : 'صندوقدار'}`;
   $('#nav').innerHTML = VIEWS.filter(([, , r]) => r === 'cashier' || isAdmin())
-    .map(([id, label, , short]) => {
-      const [icon, ...rest] = label.split(' ');
-      return `<button data-view="${id}"><span class="ni">${icon}</span><span class="nl">${rest.join(' ')}</span><span class="ns">${short}</span></button>`;
-    }).join('');
+    .map(([id, label, , short, ic]) => `<button data-view="${id}"><span class="ni">${icon(ic)}</span><span class="nl">${label}</span><span class="ns">${short}</span></button>`).join('');
   $('#nav').onclick = (e) => { const v = e.target.closest('[data-view]')?.dataset.view; if (v) go(v); };
   refreshBadge();
 }
@@ -296,14 +295,14 @@ function bindScanInput(input, handler, { onType } = {}) {
 
 async function toggleCamera(boxId, handler, btn) {
   const box = $('#' + boxId);
-  if (cameraActive()) { await stopCamera(); box.classList.add('hidden'); btn.textContent = '📷 کمره'; return; }
+  if (cameraActive()) { await stopCamera(); box.classList.add('hidden'); btn.innerHTML = `${icon('camera')} کمره`; return; }
   box.classList.remove('hidden');
-  btn.textContent = '✖ بستن کمره';
+  btn.innerHTML = `${icon('close')} بستن کمره`;
   // Known products / receipt QRs are accepted at once; unknown codes must be read twice (stops misread "not found").
   const isKnown = async (c) => !!parseReceiptQr(c) || !!(await findProduct(c));
   try { await startCamera(boxId, handler, { isKnown }); }
   catch (err) {
-    box.classList.add('hidden'); btn.textContent = '📷 کمره';
+    box.classList.add('hidden'); btn.innerHTML = `${icon('camera')} کمره`;
     toast('کمره باز نشد: اجازه کمره را بدهید (فقط روی HTTPS یا localhost کار می‌کند)', 'err');
     console.warn(err);
   }
@@ -324,7 +323,7 @@ async function renderRegister() {
     <div class="card">
       <div class="scanbar">
         <input id="scanInput" data-scan placeholder="بارکد را اسکن کنید یا نام جنس را بنویسید" autocomplete="off" autofocus>
-        <button class="btn" id="camBtn" type="button">📷 کمره</button>
+        <button class="btn" id="camBtn" type="button">${icon('camera')} کمره</button>
       </div>
       <div id="camBox" class="cam hidden"></div>
       <div id="results" class="results"></div>
@@ -381,7 +380,7 @@ async function renderRegister() {
     const b = e.target.closest('[data-bc]')?.dataset.bc; if (b) { registerCode(b); input.value = ''; $('#results').innerHTML = ''; input.focus(); } };
   $('#quickGrid').onclick = (e) => { const b = e.target.closest('[data-bc]')?.dataset.bc; if (b) registerCode(b); };
   const quick = await db.products.where('quick').equals(1).toArray();
-  $('#quickGrid').innerHTML = quick.map((p) => `<button class="btn" data-bc="${esc(p.barcode)}"><span>${p.demo ? '🧪 ' : ''}${p.unit === 'kg' ? '⚖ ' : ''}${esc(p.name)}</span><span class="small muted">${priceLabel(p)}</span></button>`).join('');
+  $('#quickGrid').innerHTML = quick.map((p) => `<button class="btn" data-bc="${esc(p.barcode)}"><span>${p.demo ? '🧪 ' : ''}${p.unit === 'kg' ? icon('scale', 'ico-sm') + ' ' : ''}${esc(p.name)}</span><span class="small muted">${priceLabel(p)}</span></button>`).join('');
   drawCart();
 }
 
@@ -467,7 +466,7 @@ function drawCart() {
         ? `<div class="qty"><button class="weight-btn num" data-w="${i}" aria-label="تغییر وزن">⚖ ${formatQty(l.qty, 'kg')}</button></div>`
         : `<div class="qty"><button data-dec="${i}" aria-label="کم">−</button><span class="num">${toDariDigits(l.qty)}</span><button data-inc="${i}" aria-label="زیاد">+</button></div>`}
       <div class="line-total num">${m(lineTotal(l))}</div>
-      <button class="btn small" data-del="${i}" aria-label="حذف">🗑</button></div>`).join('')
+      <button class="btn small icon-btn" data-del="${i}" aria-label="حذف">${icon('trash')}</button></div>`).join('')
     : '<div class="empty">سبد خالی است — جنس را اسکن کنید</div>';
   drawPay();
 }
@@ -815,7 +814,7 @@ async function renderReceive() {
     <div class="card"><div class="row"><h2 style="margin:0">📦 ${esc(b.supplier)}</h2><span class="muted">فاکتور: ${esc(b.invoiceNo || '—')}</span>
       <span class="spacer"></span><button class="btn primary" id="endBatch">ختم محموله</button></div>
       <div class="scanbar" style="margin-top:12px"><input id="recvScan" data-scan placeholder="بارکد جنس را اسکن کنید" autocomplete="off" autofocus>
-      <button class="btn" id="camBtn">📷 کمره</button><button class="btn" id="noCode" title="جنس بدون بارکد">بدون بارکد</button></div>
+      <button class="btn" id="camBtn">${icon('camera')} کمره</button><button class="btn" id="noCode" title="جنس بدون بارکد">بدون بارکد</button></div>
       <div id="camBox" class="cam hidden"></div></div>
     <div class="card hidden" id="itemCard"></div>
     <div class="card"><div class="row"><h3 style="margin:0">اجناس این محموله</h3><span class="spacer"></span>

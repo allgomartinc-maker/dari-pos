@@ -6,36 +6,38 @@
 }
 
 :root {
-  --bg: #f4f6f4;
+  /* Lapis lazuli (Badakhshan) for the brand, saffron (Herat) for money, turquoise for "all good". */
+  --bg: #f2f4f9;
   --surface: #ffffff;
-  --surface-2: #eef2ef;
-  --text: #17201b;
-  --muted: #5b6b62;
-  --border: #d5ddd8;
-  --primary: #0f5132;
-  --primary-2: #198754;
+  --surface-2: #ecf0f7;
+  --text: #121a2e;
+  --muted: #5a6480;
+  --border: #dbe1ed;
+  --primary: #1b3a8c;
+  --primary-2: #2448ad;
   --primary-ink: #ffffff;
-  --accent: #b8860b;
-  --danger: #b42318;
-  --danger-bg: #fdecea;
-  --warn: #9a6700;
-  --warn-bg: #fff4d6;
-  --ok: #146c43;
-  --ok-bg: #dff3e8;
+  --accent: #f0a500;
+  --accent-ink: #2a1c00;
+  --danger: #c2332e;
+  --danger-bg: #fcebe9;
+  --warn: #8a5a00;
+  --warn-bg: #fff4d9;
+  --ok: #0b8577;
+  --ok-bg: #e0f4f1;
   --radius: 14px;
-  --shadow: 0 1px 2px rgba(0,0,0,.06), 0 4px 14px rgba(0,0,0,.06);
+  --shadow: 0 1px 2px rgba(18,26,46,.06), 0 6px 20px rgba(18,26,46,.06);
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #0f1412; --surface: #18201c; --surface-2: #212b26; --text: #e8efe9; --muted: #9fb0a6;
-    --border: #2f3b35; --primary: #2fa36b; --primary-2: #3cbf80; --primary-ink: #04150c;
-    --danger: #ff7a6b; --danger-bg: #3a1714; --warn: #f5c451; --warn-bg: #3a2e10; --ok: #5fd39a; --ok-bg: #12301f;
+    --bg: #0c1120; --surface: #141b2e; --surface-2: #1c253d; --text: #e7ebf6; --muted: #98a2bf;
+    --border: #28324d; --primary: #6b8cf0; --primary-2: #7c9af3; --primary-ink: #0a0f1e; --accent: #f5b82e; --accent-ink: #2a1c00;
+    --danger: #ff7a6b; --danger-bg: #3a1714; --warn: #f5c451; --warn-bg: #3a2e10; --ok: #3cc9b6; --ok-bg: #0f2f2b;
   }
 }
 :root[data-theme="dark"] {
-  --bg: #0f1412; --surface: #18201c; --surface-2: #212b26; --text: #e8efe9; --muted: #9fb0a6;
-  --border: #2f3b35; --primary: #2fa36b; --primary-2: #3cbf80; --primary-ink: #04150c;
-  --danger: #ff7a6b; --danger-bg: #3a1714; --warn: #f5c451; --warn-bg: #3a2e10; --ok: #5fd39a; --ok-bg: #12301f;
+  --bg: #0c1120; --surface: #141b2e; --surface-2: #1c253d; --text: #e7ebf6; --muted: #98a2bf;
+  --border: #28324d; --primary: #6b8cf0; --primary-2: #7c9af3; --primary-ink: #0a0f1e; --accent: #f5b82e; --accent-ink: #2a1c00;
+  --danger: #ff7a6b; --danger-bg: #3a1714; --warn: #f5c451; --warn-bg: #3a2e10; --ok: #3cc9b6; --ok-bg: #0f2f2b;
 }
 
 * { box-sizing: border-box; }
@@ -71,7 +73,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .nav button.active { background: rgba(255,255,255,.18); color: #fff; }
 .top-right { display: flex; align-items: center; gap: 8px; }
 .badge { border: 0; border-radius: 999px; padding: 4px 12px; font-weight: 700; cursor: pointer; font-size: .85rem; }
-.badge.online { background: #d1f2df; color: #0f5132; }
+.badge.online { background: #dff4f1; color: #0b5c52; }
 .badge.offline { background: #ffe1b3; color: #7a4a00; }
 .badge.error { background: #ffd2cc; color: #8a1c10; }
 .chip { background: rgba(255,255,255,.15); padding: 4px 10px; border-radius: 999px; font-size: .85rem; }
@@ -95,7 +97,7 @@ main { padding: 16px; max-width: 1400px; margin: 0 auto; }
 .btn:hover { filter: brightness(.97); }
 .btn:active { transform: translateY(1px); }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
-.btn.primary { background: var(--primary-2); border-color: var(--primary-2); color: #fff; }
+.btn.primary { background: var(--primary-2); border-color: var(--primary-2); color: var(--primary-ink); box-shadow: 0 2px 8px color-mix(in srgb, var(--primary-2) 30%, transparent); }
 .btn.danger { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn.ghost { background: transparent; border-color: rgba(255,255,255,.4); color: #fff; }
 .btn.small { padding: 6px 10px; min-height: 34px; font-size: .9rem; }
@@ -184,9 +186,9 @@ tr.voided td { text-decoration: line-through; color: var(--muted); }
 .modal h2 { margin-top: 0; }
 .modal .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 16px; }
 .toasts { position: fixed; bottom: 16px; left: 16px; right: 16px; display: flex; flex-direction: column; align-items: center; gap: 8px; z-index: 60; pointer-events: none; }
-.toast { background: #17201b; color: #fff; padding: 10px 16px; border-radius: 12px; box-shadow: var(--shadow); max-width: 520px; font-weight: 600; }
+.toast { background: #121a2e; color: #fff; padding: 10px 16px; border-radius: 12px; box-shadow: var(--shadow); max-width: 520px; font-weight: 600; }
 .toast.err { background: var(--danger); }
-.toast.ok { background: #146c43; }
+.toast.ok { background: var(--ok); }
 
 @media (max-width: 600px) {
   main { padding: 12px; }
@@ -315,3 +317,64 @@ html { touch-action: manipulation; }
 .ios-share { display: inline-block; border: 1.5px solid currentColor; border-radius: 6px; padding: 0 5px; font-weight: 800; }
 .warn-text { color: var(--warn); font-weight: 700; }
 .setup .install-card { margin: 0 0 6px; }
+
+
+/* ================= professional pass ================= */
+.ico { width: 1.3em; height: 1.3em; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+h1, h2, h3 { letter-spacing: -.01em; font-weight: 800; }
+.num, .total-due .v, .change-box .v, .stat .v, .line-total, .pj-total { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+.btn { border-radius: 12px; transition: background-color .15s, border-color .15s, box-shadow .15s, transform .05s; }
+.btn:not(.primary):not(.danger):not(.ghost):hover { border-color: color-mix(in srgb, var(--primary-2) 40%, var(--border)); }
+input:focus, select:focus, textarea:focus { border-color: var(--primary-2); outline-color: color-mix(in srgb, var(--primary-2) 35%, transparent); }
+.card { box-shadow: var(--shadow); }
+
+/* top bar: lapis, calm */
+.topbar { background: var(--primary); box-shadow: 0 1px 0 rgba(255,255,255,.06) inset, 0 2px 10px rgba(12,20,50,.18); }
+.logo { background: var(--accent); color: var(--accent-ink); font-weight: 900; }
+.nav button { display: inline-flex; align-items: center; gap: 6px; }
+
+/* signature: the till display — saffron numbers on lapis, faint Herati star tiling */
+.total-due {
+  position: relative; overflow: hidden; color: #fff;
+  background:
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='56' height='56' viewBox='0 0 56 56'%3E%3Cg fill='none' stroke='%23ffffff' stroke-opacity='.09' stroke-width='1.2'%3E%3Cpath d='M28 6l6.4 15.6L50 28l-15.6 6.4L28 50l-6.4-15.6L6 28l15.6-6.4z'/%3E%3Cpath d='M28 14l9.9 4.1L42 28l-4.1 9.9L28 42l-9.9-4.1L14 28l4.1-9.9z'/%3E%3C/g%3E%3C/svg%3E") repeat,
+    linear-gradient(135deg, #1b3a8c 0%, #14296a 100%);
+  border-radius: 18px; padding: 16px 18px;
+}
+.total-due .k { opacity: .8; font-weight: 600; letter-spacing: .01em; }
+.total-due .v { color: var(--accent); text-shadow: 0 1px 0 rgba(0,0,0,.25); }
+.total-due .v .cur { color: #fff; opacity: .75; text-shadow: none; }
+.change-box { border-width: 0; box-shadow: inset 0 0 0 2px var(--ok); }
+.change-box.short { box-shadow: inset 0 0 0 2px var(--danger); }
+.pay-jump { background: linear-gradient(135deg, #1b3a8c, #14296a) !important; }
+.pay-jump .pj-total { color: var(--accent); }
+.pay-jump .pj-go { background: var(--accent); color: var(--accent-ink); }
+#completeBtn { background: var(--ok); border-color: var(--ok); color: #fff; box-shadow: 0 4px 14px color-mix(in srgb, var(--ok) 35%, transparent); }
+#completeBtn:disabled { box-shadow: none; }
+
+/* quick buttons and cart: cleaner tiles */
+.quick-grid button { background: var(--surface); border-color: var(--border); align-items: flex-start; text-align: start; padding: 8px 10px; }
+.quick-grid button span:first-child { font-weight: 700; }
+.cart-line .name { font-size: 1rem; }
+.qty button { background: var(--surface); }
+.empty { padding: 26px 0; }
+
+/* lock screen keypad */
+.keypad button { background: var(--surface); box-shadow: 0 1px 2px rgba(18,26,46,.05); }
+.keypad button:active { background: var(--surface-2); transform: translateY(1px); }
+.pin-dots span { border-color: var(--primary-2); }
+.pin-dots span.on { background: var(--primary-2); }
+
+@media (max-width: 900px) {
+  .nav button { display: flex; }
+  .nav button .ni { font-size: inherit; line-height: 0; }
+  .nav button .ni .ico { width: 24px; height: 24px; }
+  .nav button.active { background: color-mix(in srgb, var(--primary-2) 12%, transparent); color: var(--primary-2); }
+  .nav button.active .ico { stroke-width: 2.3; }
+}
+@media (prefers-reduced-motion: reduce) { .btn { transition: none; } }
+.ico-sm { width: 1em; height: 1em; vertical-align: -0.12em; }
+.icon-btn { color: var(--danger); padding: 6px 10px; }
+.lock-mark { width: 52px; height: 52px; margin: 2px auto 8px; border-radius: 16px; display: grid; place-items: center; font-size: 1.6rem; font-weight: 900;
+  color: var(--accent); background: linear-gradient(135deg, #2448ad, #14296a); box-shadow: 0 6px 16px rgba(20,41,106,.25); }
+.install-card { background: color-mix(in srgb, var(--primary-2) 6%, var(--surface)); border-color: color-mix(in srgb, var(--primary-2) 45%, transparent); }

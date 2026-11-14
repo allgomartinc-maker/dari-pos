@@ -2,6 +2,7 @@
 //  - USB / Bluetooth handheld scanners in "keyboard wedge" mode (fast keystrokes + Enter)
 //  - Device camera via html5-qrcode (ZXing, Apache-2.0), using native BarcodeDetector when available
 import { normalizeBarcode } from './logic.js';
+import { loadScript, LIBS } from './lazy.js';
 
 let handler = null;
 let buf = '';
@@ -139,13 +140,12 @@ async function nativeDecoder() {
 let wasmReady = null;
 function loadWasm() {
   if (!wasmReady) {
-    const Z = window.ZXingWASM;
-    if (!Z || typeof WebAssembly !== 'object') return Promise.reject(new Error('no wasm'));
+    if (typeof WebAssembly !== 'object') return Promise.reject(new Error('no wasm'));
     const base = new URL('vendor/zxing/', document.baseURI).href; // served locally and cached for offline use
-    wasmReady = Z.prepareZXingModule({
+    wasmReady = loadScript(LIBS.zxing).then(() => window.ZXingWASM.prepareZXingModule({
       overrides: { locateFile: (path, prefix) => (path.endsWith('.wasm') ? base + path : prefix + path) },
       fireImmediately: true
-    }).then(() => Z).catch((e) => { wasmReady = null; throw e; });
+    })).then(() => window.ZXingWASM).catch((e) => { wasmReady = null; throw e; });
   }
   return wasmReady;
 }
@@ -225,7 +225,8 @@ export function paperCut(img, frac = 0.2) {
   return img;
 }
 
-function jsDecoder() {
+async function jsDecoder() {
+  await loadScript(LIBS.html5qr);
   const F = window.Html5QrcodeSupportedFormats;
   document.getElementById('zxingHolder')?.remove();
   const holder = document.createElement('div');
@@ -254,7 +255,7 @@ async function makeDecoder() {
   d = await wasmDecoder();
   if (d) { decoderName = 'wasm'; return d; }
   decoderName = 'js';
-  return jsDecoder();
+  return await jsDecoder();
 }
 
 // Zoom, flashlight and tap-to-focus, where the phone allows them.

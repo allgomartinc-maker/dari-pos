@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#0f5132">
+  <meta name="theme-color" content="#1b3a8c">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -13,6 +13,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="preload" href="vendor/fonts/Vazirmatn.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
@@ -22,18 +23,15 @@
     <div class="top-right">
       <button id="syncBadge" class="badge" type="button" title="همگام‌سازی"></button>
       <span id="userChip" class="chip"></span>
-      <button id="lockBtn" class="btn ghost small" type="button">🔒 قفل</button>
+      <button id="lockBtn" class="btn ghost small" type="button"><svg class="ico" viewBox="0 0 24 24" aria-hidden="true"><rect x="4.5" y="10.5" width="15" height="10" rx="2"/><path d="M8 10.5V7.5a4 4 0 0 1 8 0v3"/></svg> قفل</button>
     </div>
   </header>
   <main id="main"></main>
   <div id="modalRoot"></div>
   <div id="toasts" class="toasts" aria-live="polite"></div>
 
-  <!-- Free, open-source libraries, served locally (no internet needed) -->
+  <!-- Free, open-source libraries, served locally (no internet needed). Scanner and QR libraries load on demand (js/lazy.js). -->
   <script src="vendor/dexie.min.js"></script>
-  <script src="vendor/html5-qrcode.min.js"></script>
-  <script src="vendor/qrcode.js"></script>
-  <script src="vendor/zxing/zxing-reader.js"></script>
   <script type="module" src="js/app.js"></script>
 </body>
 </html>

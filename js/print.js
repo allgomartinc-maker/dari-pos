@@ -3,6 +3,7 @@
 //  2) Canvas -> 1-bit raster -> ESC/POS over Web Bluetooth (Dari text can't use printer code pages,
 //     so we draw it with the browser's font shaping and send it as an image — works on any ESC/POS printer).
 import { formatMoney, dariDate, receiptQr, packRaster, escposRasterCommand, toDariDigits, AFN_DENOMS, formatNumber, formatQty, lineTotal } from './logic.js';
+import { loadScript, LIBS } from './lazy.js';
 
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
@@ -113,7 +114,8 @@ body{font-family:Vazirmatn,Tahoma,sans-serif;width:${px}px;margin:0 auto;padding
 </style></head><body>${body}</body></html>`;
 }
 
-export function printHtml(doc, widthMm = 80) {
+export async function printHtml(doc, widthMm = 80) {
+  await loadScript(LIBS.qr);
   return new Promise((resolve) => {
     const iframe = document.createElement('iframe');
     iframe.style.cssText = 'position:fixed;width:0;height:0;border:0;opacity:0';
@@ -211,6 +213,7 @@ export async function printBluetooth(doc, widthMm) {
   if (!bt) await connectBluetooth();
   if (!bt.device.gatt.connected) await bt.device.gatt.connect();
   try { await document.fonts.load('24px Vazirmatn'); } catch { /* ignore */ }
+  await loadScript(LIBS.qr);
   const data = escposFromDoc(doc, widthMm);
   const chunk = 180;
   for (let i = 0; i < data.length; i += chunk) {
