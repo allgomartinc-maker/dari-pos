@@ -80,3 +80,16 @@ test('statementText: Dari text with name, what is owed and recent lines', () => 
   assert.match(t, /فروشگاه TR/); assert.match(t, /احمد/); assert.match(t, /مانده قرض: ۱٬۵۰۰ افغانی/);
   assert.match(t, /دریافت/); assert.equal(t.split('\n').filter((l) => / · /.test(l)).length, 2);
 });
+
+test('void of a qarz sale: the qarz part comes off the account; no drawer change', async () => {
+  const { voidQarzEffects } = await import('../js/qarz.js');
+  assert.deepEqual(voidQarzEffects({ customerId: 'a', credit: 30000, overpaidToQarz: 0 }), { ledger: [-30000], drawerOut: 0 });
+});
+test('void of a sale where extra cash paid old qarz: that payment is undone and handed back from the drawer', async () => {
+  const { voidQarzEffects } = await import('../js/qarz.js');
+  assert.deepEqual(voidQarzEffects({ customerId: 'a', credit: 0, overpaidToQarz: 50000 }), { ledger: [50000], drawerOut: 50000 });
+});
+test('void of a plain cash sale: nothing for qarz', async () => {
+  const { voidQarzEffects } = await import('../js/qarz.js');
+  assert.deepEqual(voidQarzEffects({ total: 100 }), { ledger: [], drawerOut: 0 });
+});

@@ -82,3 +82,13 @@ export function statementText({ storeName, customer, entries, balance }) {
   for (const x of recent) lines.push(`${dariDate(x.timestamp, { time: false })} · ${LEDGER_LABEL[x.type] || x.type} · ${formatMoney(Math.abs(x.amount))}`);
   return lines.join('\n');
 }
+
+/** What voiding a sale does to qarz: ledger amounts to add (as type 'void') and cash handed back from the current drawer.
+ *  The qarz part comes off the account; extra cash that paid old qarz is undone and returned to the customer. */
+export function voidQarzEffects(sale) {
+  if (!sale.customerId) return { ledger: [], drawerOut: 0 };
+  const ledger = [];
+  if (sale.credit) ledger.push(-sale.credit);
+  if (sale.overpaidToQarz) ledger.push(sale.overpaidToQarz);
+  return { ledger, drawerOut: sale.overpaidToQarz || 0 };
+}

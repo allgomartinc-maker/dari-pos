@@ -13,7 +13,7 @@ import { receiptDoc, paymentSlipDoc, zReportDoc, labelDoc, printHtml, printBluet
 import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep, warmUpScanner, decoderName, upcVariants } from './scanner.js';
 import { $, $$, esc, toast, modal, confirmBox, formBox, keypadHtml, bindPinPad, askPin, download, pickFile } from './ui.js';
 import { icon } from './icons.js';
-import { balanceOf, balancesById, splitQarzPayment, overLimit, findCustomers, ledgerEntry, statementText, LEDGER_LABEL } from './qarz.js';
+import { balanceOf, balancesById, splitQarzPayment, overLimit, findCustomers, ledgerEntry, statementText, LEDGER_LABEL, voidQarzEffects } from './qarz.js';
 
 // On screen the word «افغانی» is drawn small after the number; plain text (toasts, confirms, receipts) uses formatMoney.
 const m = (p) => `${formatNumber(p)} <small class="cur">افغانی</small>`;
@@ -969,11 +969,14 @@ async function showReceipt(receiptId) {
       box.querySelector('[data-void]')?.addEventListener('click', async () => {
         const admin = await requireAdmin('باطل کردن رسید به رمز مدیر نیاز دارد');
         if (!admin) return;
-        if (!(await confirmBox(`رسید ${sale.receiptId} به مبلغ ${formatMoney(sale.total)} باطل شود؟ اجناس به گدام برمی‌گردد.`, { danger: true, okText: 'باطل شود' }))) return;
-        await voidSale(sale, admin);
+        if (!(await confirmBox(`رسید ${sale.receiptId} به مبلغ ${formatMoney(sale.total)} باطل شود؟ اجناس به گدام برمی‌گردد.${sale.credit ? ` ${formatMoney(sale.credit)} از قرض ${sale.customerName} کم می‌شود.` : ''}`, { danger: true, okText: 'باطل شود' }))) return;
+        if (await voidSale(sale, admin) === false) return;
         close();
-        toast('رسید باطل شد', 'ok');
+        toast(sale.overpaidToQarz ? `رسید باطل شد — ${formatMoney(sale.overpaidToQarz)} پول قرض را به مشتری پس بدهید` : 'رسید باطل شد', 'ok');
         if (state.view === 'reports') renderReports();
+        // Voided from a customer's page: refresh that page so it shows the new balance.
+        const page = document.querySelector('.cust-page');
+        if (page && sale.customerId) { page.closest('.modal-back').querySelector('[data-close]').click(); showCustomer(sale.customerId); }
       });
     }
   });
@@ -981,14 +984,26 @@ async function showReceipt(receiptId) {
 
 async function voidSale(sale, admin) {
   const ts = now();
-  await db.transaction('rw', db.sales, db.products, async () => {
+  const q = voidQarzEffects(sale);
+  // Extra cash that paid old qarz is handed back now, from whichever shift is open.
+  const shift = q.drawerOut ? await openShift() : null;
+  if (q.drawerOut && !shift) { toast('برای باطل کردن این رسید شفت باید باز باشد (پول قرض پس داده می‌شود)', 'err'); return false; }
+  await db.transaction('rw', [db.sales, db.products, db.ledger, db.movements, db.customers], async () => {
     await db.sales.update(sale.receiptId, { voided: 1, voidedBy: admin.name, voidedAt: ts, updatedAt: ts, synced: sale.practice ? 1 : 0 });
     for (const l of sale.items) {
       const p = await db.products.get(l.barcode);
       if (p) await db.products.update(l.barcode, { stock: addQty(p.stock, l.qty), updatedAt: ts, synced: p.demo ? 1 : 0 });
     }
+    if (q.ledger.length) {
+      const customer = (await db.customers.get(sale.customerId)) || { id: sale.customerId, name: sale.customerName };
+      for (const amount of q.ledger) await db.ledger.add(ledgerEntry({ customer, type: 'void', amount, receiptId: sale.receiptId, shiftId: shift?.shiftId, by: admin.name }));
+      if (q.drawerOut) await db.movements.add({ id: randomId(), shiftId: shift.shiftId, type: 'qarz', amount: -q.drawerOut, note: `باطل ${sale.receiptId} — ${customer.name}`,
+        userName: admin.name, approvedBy: admin.name, timestamp: ts, updatedAt: ts, synced: 0 });
+      await db.customers.update(sale.customerId, { updatedAt: ts, synced: 0 });
+    }
   });
   refreshBadge();
+  return true;
 }
 
 // ====================================================================== shift
@@ -1022,7 +1037,7 @@ async function renderShift() {
     return;
   }
   const moves = await db.movements.where('shiftId').equals(shift.shiftId).toArray();
-  const label = { payout: 'مصرف / پرداخت', drop: 'برداشت به گاوصندوق', payin: 'افزودن پول' };
+  const label = { payout: 'مصرف / پرداخت', drop: 'برداشت به گاوصندوق', payin: 'افزودن پول', qarz: 'دریافت قرض' };
   $('#main').innerHTML = `<div class="stack">
     <div class="card"><h2>شفت جاری <span class="ltr">${esc(shift.shiftId)}</span></h2>
       <p>باز شده توسط <b>${esc(shift.cashierName)}</b> — ${esc(dariDate(shift.openedAt))}</p>
@@ -1074,6 +1089,7 @@ async function preCloseCheck(shift) {
       <tr><td>باز شده</td><td>${esc(shift.cashierName)} — ${esc(dariDate(shift.openedAt))}</td></tr>
       <tr><td>تعداد فروش</td><td><b>${toDariDigits(done)}</b>${voided ? ` <span class="muted">(+${toDariDigits(voided)} باطل شده)</span>` : ''}${practiceN ? ` <span class="muted">· 🧪 ${toDariDigits(practiceN)} تمرینی (حساب نمی‌شود)</span>` : ''}</td></tr>
       <tr><td>حرکت پول</td><td>برداشت ${toDariDigits(by('drop'))} · مصرف ${toDariDigits(by('payout'))} · افزودن ${toDariDigits(by('payin'))}</td></tr>
+      ${by('qarz') ? `<tr><td>دریافت قرض</td><td>${toDariDigits(by('qarz'))} بار · ${m(moves.filter((x) => x.type === 'qarz').reduce((a, x) => a + x.amount, 0))}</td></tr>` : ''}
       <tr><td>در انتظار ارسال به شیت</td><td><b>${toDariDigits(pending)}</b> ریکارد</td></tr>
     </tbody></table>
     ${warn.map((w) => `<div class="status-warn"><span>${w}</span></div>`).join('')}
@@ -1136,7 +1152,7 @@ async function finalizeShift(shift, denoms, counted) {
   const ts = now();
   const rec = {
     ...shift, status: 'closed', closedAt: ts, closedBy: state.user.name, denoms, countedCash: counted, expectedCash: exp.expected, variance,
-    varianceStatus: varianceStatus(variance), netCash: exp.netCash, payouts: exp.payouts, drops: exp.drops, payins: exp.payins,
+    varianceStatus: varianceStatus(variance), netCash: exp.netCash, payouts: exp.payouts, drops: exp.drops, payins: exp.payins, qarzIn: exp.qarzIn,
     grossSales: sales.reduce((a, s) => a + s.total, 0), voidTotal: sales.filter((s) => s.voided).reduce((a, s) => a + s.total, 0),
     txCount: sales.filter((s) => !s.voided).length, updatedAt: ts, synced: 0
   };
@@ -1153,6 +1169,7 @@ function showShiftResult(r) {
       <tr><td>پول آغاز شفت</td><td>${m(r.startingFloat)}</td></tr>
       <tr><td>فروش خالص نقدی</td><td>${m(r.netCash)}</td></tr>
       <tr><td>افزودن پول / مصارف / برداشت</td><td>${m(r.payins)} / ${m(r.payouts)} / ${m(r.drops)}</td></tr>
+      ${r.qarzIn ? `<tr><td>دریافت قرض</td><td>${m(r.qarzIn)}</td></tr>` : ''}
       <tr><td><b>متوقع در دخل</b></td><td><b>${m(r.expectedCash)}</b></td></tr>
       <tr><td><b>شمارش شده</b></td><td><b>${m(r.countedCash)}</b></td></tr>
     </tbody></table>
