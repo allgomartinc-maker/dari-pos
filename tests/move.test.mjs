@@ -68,3 +68,26 @@ test('cleanBackup drops a sync address that is not a Google Apps Script link', (
   assert.match(Object.fromEntries(cleanBackup(ws).tables.settings.map((r) => [r.key, r.value])).webhookUrl, /shop\.af/);
   assert.equal(Object.fromEntries(cleanBackup(ok).tables.settings.map((r) => [r.key, r.value])).webhookUrl, 'https://script.google.com/macros/s/AKfy/exec');
 });
+
+test('qarz: a backup made before qarz existed clears qarz on restore (no balances pointing at missing sales)', () => {
+  const d = cleanBackup(backup());
+  assert.deepEqual(d.tables.customers, []);
+  assert.deepEqual(d.tables.ledger, []);
+});
+
+test('qarz: ledger amounts, limits and qarz fields on sales become whole pul', () => {
+  const b = backup();
+  b.tables.customers = [{ id: 'c1', name: 'احمد', limit: '5000.6' }];
+  b.tables.ledger = [{ id: 'l1', customerId: 'c1', amount: '1200.4', type: 'sale' }];
+  Object.assign(b.tables.sales[0], { credit: '300.2', overpaidToQarz: 'x', balanceAfter: 99.9 });
+  const d = cleanBackup(b);
+  assert.equal(d.tables.ledger[0].amount, 1200);
+  assert.equal(d.tables.customers[0].limit, 5001);
+  assert.deepEqual([d.tables.sales[0].credit, d.tables.sales[0].overpaidToQarz, d.tables.sales[0].balanceAfter], [300, 0, 100]);
+});
+
+test('qarz: a second till starts with no customers and no qarz history', () => {
+  const b = backup(); b.tables.customers = [{ id: 'c1', name: 'x' }]; b.tables.ledger = [{ id: 'l1', customerId: 'c1', amount: 5 }];
+  const d = prepareSecondTill(cleanBackup(b));
+  assert.deepEqual(d.tables.customers, []); assert.deepEqual(d.tables.ledger, []);
+});

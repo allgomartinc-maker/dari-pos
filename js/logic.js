@@ -107,14 +107,15 @@ export function countDenoms(counts) {
 }
 
 export function shiftExpected({ startingFloat, sales, movements = [] }) {
-  let netCash = 0, payouts = 0, drops = 0, payins = 0;
+  let netCash = 0, payouts = 0, drops = 0, payins = 0, qarzIn = 0;
   for (const s of sales) if (!s.voided) netCash += s.cashReceived - s.changeGiven;
   for (const m of movements) {
     if (m.type === 'payout') payouts += m.amount;
     else if (m.type === 'drop') drops += m.amount;
     else if (m.type === 'payin') payins += m.amount;
+    else if (m.type === 'qarz') qarzIn += m.amount; // qarz collected (negative when an overpayment is handed back on a void)
   }
-  return { netCash, payouts, drops, payins, expected: startingFloat + netCash + payins - payouts - drops };
+  return { netCash, payouts, drops, payins, qarzIn, expected: startingFloat + netCash + payins + qarzIn - payouts - drops };
 }
 
 export function varianceStatus(v) {
@@ -429,6 +430,7 @@ export function cleanBackup(data) {
   for (const p of t.products || []) { p.barcode = String(p.barcode); p.name = String(p.name ?? ''); p.price = pul(p.price); p.cost = pul(p.cost); p.stock = qty(p.stock); }
   for (const s of t.sales || []) {
     for (const k of ['total', 'cashReceived', 'changeGiven']) s[k] = pul(s[k]);
+    for (const k of ['credit', 'overpaidToQarz', 'balanceAfter']) if (k in s) s[k] = pul(s[k]);
     s.items = (s.items || []).map((l) => ({ ...l, name: String(l.name ?? ''), qty: qty(l.qty), price: pul(l.price), cost: pul(l.cost) }));
   }
   for (const s of t.shifts || []) {
@@ -437,6 +439,9 @@ export function cleanBackup(data) {
   }
   // Sales only ever go to a Google Apps Script web app; a file pointing anywhere else loses the address.
   for (const r of t.settings || []) if (r.key === 'webhookUrl' && !/^https:\/\/script\.google\.com\/(a\/macros\/[\w.-]+|macros)\/s\/[\w-]+\/exec$/.test(String(r.value ?? ''))) r.value = '';
+  // Qarz: a backup from before qarz has no such tables; restoring it must clear them (it is a full snapshot).
+  t.customers = (t.customers || []).map((c) => ({ ...c, id: String(c.id), name: String(c.name ?? ''), phone: String(c.phone ?? ''), limit: pul(c.limit) }));
+  t.ledger = (t.ledger || []).map((x) => ({ ...x, id: String(x.id), customerId: String(x.customerId), amount: pul(x.amount) }));
   for (const r of t.settings || []) if (r.key === 'deviceId') r.value = String(r.value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) || 'T1';
   return data;
 }
@@ -461,6 +466,6 @@ export function prepareSecondTill(data) {
   });
   t.settings = Object.entries(set).map(([key, value]) => ({ key, value }));
   t.products = (t.products || []).map((p) => ({ ...p, stock: 0 }));
-  for (const k of ['sales', 'shifts', 'movements', 'receivings']) t[k] = [];
+  for (const k of ['sales', 'shifts', 'movements', 'receivings', 'customers', 'ledger']) t[k] = [];
   return data;
 }

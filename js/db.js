@@ -13,6 +13,11 @@ db.version(1).stores({
   users: '&id, name, source',
   settings: '&key'
 });
+// v2: qarz (customer credit). New tables start empty; nothing to migrate.
+db.version(2).stores({
+  customers: '&id, name, phone, synced, deleted',
+  ledger: '&id, customerId, timestamp, synced'
+});
 
 const DEFAULTS = {
   storeName: 'فروشگاه من',

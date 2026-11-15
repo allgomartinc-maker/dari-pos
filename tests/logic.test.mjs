@@ -63,7 +63,7 @@ test('shiftExpected = float + net cash of non-voided sales - payouts - drops', (
   const r = shiftExpected({ startingFloat: 150000, sales, movements: [
     { type: 'payout', amount: 2000 }, { type: 'drop', amount: 50000 }, { type: 'payin', amount: 1000 }
   ] });
-  assert.deepEqual(r, { netCash: 9500, payouts: 2000, drops: 50000, payins: 1000, expected: 108500 });
+  assert.deepEqual(r, { netCash: 9500, payouts: 2000, drops: 50000, payins: 1000, qarzIn: 0, expected: 108500 });
 });
 
 test('varianceStatus', () => {
@@ -297,4 +297,11 @@ test('installMode: picks the right "add to home screen" help for each phone', ()
   assert.equal(installMode({ ua: ipad13, standalone: false, canPrompt: false, touch: 5 }), 'ios'); // iPad pretends to be a Mac
   assert.equal(installMode({ ua: ipad13, standalone: false, canPrompt: false, touch: 0 }), 'manual'); // a real Mac
   assert.equal(installMode({ ua: android, standalone: false, canPrompt: false }), 'manual');
+});
+
+test('shift cash: qarz collected counts as cash in the drawer', async () => {
+  const { shiftExpected } = await import('../js/logic.js');
+  const r = shiftExpected({ startingFloat: 0, sales: [], movements: [{ type: 'qarz', amount: 50000 }] });
+  assert.equal(r.expected, 50000);
+  assert.equal(r.qarzIn, 50000);
 });
