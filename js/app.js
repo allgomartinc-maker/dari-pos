@@ -13,7 +13,7 @@ import { receiptDoc, paymentSlipDoc, zReportDoc, labelDoc, printHtml, printBluet
 import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep, warmUpScanner, decoderName, upcVariants } from './scanner.js';
 import { $, $$, esc, toast, modal, confirmBox, formBox, keypadHtml, bindPinPad, askPin, download, pickFile } from './ui.js';
 import { icon } from './icons.js';
-import { balanceOf, balancesById, splitQarzPayment, overLimit, findCustomers, ledgerEntry, statementText, LEDGER_LABEL, voidQarzEffects, qarzTotals } from './qarz.js';
+import { balanceOf, balancesById, splitQarzPayment, overLimit, findCustomers, ledgerEntry, statementText, LEDGER_LABEL, voidQarzEffects, qarzTotals, sameNameExists, needsLimitApproval } from './qarz.js';
 
 // On screen the word «افغانی» is drawn small after the number; plain text (toasts, confirms, receipts) uses formatMoney.
 const m = (p) => `${formatNumber(p)} <small class="cur">افغانی</small>`;
@@ -692,8 +692,7 @@ function askQarzCustomer(total) {
             <p class="muted small" id="dupWarn"></p>
             <div class="actions"><button class="btn primary grow" type="submit">ذخیره</button><button class="btn" type="button" data-back>برگشت</button></div></form>`;
           const f = root.querySelector('#ncf');
-          const dup = () => { const n = f.name.value.trim().toLowerCase(); const hit = n && customers.find((c) => !c.deleted && c.name.trim().toLowerCase() === n);
-            root.querySelector('#dupWarn').textContent = hit ? '⚠ این نام قبلاً هست — اگر همان شخص است، از فهرست انتخاب کنید' : ''; };
+          const dup = () => { root.querySelector('#dupWarn').textContent = sameNameExists(customers, f.name.value) ? '⚠ این نام قبلاً هست — اگر همان شخص است، از فهرست انتخاب کنید' : ''; };
           f.name.oninput = dup; dup();
           root.querySelector('[data-back]').onclick = () => listView(name);
           f.onsubmit = async (e) => {
@@ -722,7 +721,7 @@ function askQarzCustomer(total) {
               r.credit ? `<div class="add">${m(r.credit)} به قرض اضافه شد</div>` : '',
               r.overpaid ? `<div class="paid">${m(r.overpaid)} از قرض کم شد ✔</div>` : '',
               `<div class="total">${r.newBalance < 0 ? 'دکان بدهکار است' : 'مانده کل قرض'}: <b class="num">${m(Math.abs(r.newBalance))}</b></div>`,
-              overLimit(c, r.newBalance) ? `<div class="warn">بیش از حد قرض این مشتری (${m(c.limit)}) — تأیید مدیر لازم است</div>` : ''
+              needsLimitApproval(c, r) ? `<div class="warn">بیش از حد قرض این مشتری (${m(c.limit)}) — تأیید مدیر لازم است</div>` : ''
             ].join('');
           };
           cash.oninput = draw; draw();
@@ -740,7 +739,7 @@ async function completeQarzSale({ customer, cash, balance, shift, total }) {
   const r = splitQarzPayment({ total, cash, balance });
   if (r.overBalance && !(await confirmBox('بیشتر از قرض است — باز هم ثبت شود؟ (دکان به مشتری بدهکار می‌شود)'))) return;
   let limitApprovedBy;
-  if (overLimit(customer, r.newBalance)) {
+  if (needsLimitApproval(customer, r)) {
     const a = await requireAdmin('بیش از حد قرض این مشتری — تأیید مدیر');
     if (!a) return;
     limitApprovedBy = a.name;
@@ -797,6 +796,7 @@ async function renderQarz(query = '') {
   $('#qAdd').onclick = async () => {
     const v = await formBox('مشتری نو', [{ name: 'name', label: 'نام', required: true }, { name: 'phone', label: 'تلفن (اختیاری)', inputmode: 'tel' }]);
     if (!v?.name?.trim()) return;
+    if (sameNameExists(customers, v.name) && !(await confirmBox(`«${v.name.trim()}» قبلاً در فهرست هست. اگر همان شخص است «لغو» را بزنید و از فهرست انتخاب کنید. باز هم مشتری نو ساخته شود؟`, { okText: 'بلی، شخص دیگر است' }))) return;
     const c = newCustomer(v.name, v.phone);
     await db.customers.put(c);
     refreshBadge();
@@ -905,6 +905,7 @@ async function editCustomer(c) {
     { name: 'limit', label: 'حد قرض (افغانی، ۰ = بدون حد)', value: c.limit ? formatNumber(c.limit) : '0', inputmode: 'decimal' }
   ]);
   if (!v?.name?.trim()) return false;
+  if (sameNameExists(await db.customers.toArray(), v.name, c.id) && !(await confirmBox(`«${v.name.trim()}» قبلاً در فهرست هست. باز هم ذخیره شود؟`))) return false;
   await db.customers.update(c.id, { name: v.name.trim(), phone: toLatin(v.phone || ''), limit: parseMoney(v.limit), updatedAt: now(), synced: 0 });
   refreshBadge();
   return true;

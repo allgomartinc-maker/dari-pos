@@ -1,7 +1,7 @@
 // Online-only part: pushes queued records to the Google Apps Script web app and pulls users / prices.
 // Everything else works without internet. Records stay synced=0 until the server answers {ok:true}.
 import { db, getSettings, setSetting } from './db.js';
-import { mergePulledProduct, syncedTables } from './logic.js';
+import { mergePulledProduct, syncedTables, needsQarzResend } from './logic.js';
 
 const TABLES = ['sales', 'receivings', 'shifts', 'movements', 'products', 'customers', 'ledger'];
 const BATCH = 200;
@@ -35,7 +35,7 @@ export async function syncNow({ pull = true } = {}) {
   emit({ running: true });
   let sent = 0;
   let tables = TABLES; // shrinks for this run if the script is too old for qarz, so the loop can't spin on rows it won't take
-  let qarzWaiting = false;
+  let qarzWaiting = false, resent = false;
   try {
     for (;;) {
       const payload = { action: 'push', token: s.syncToken, deviceId: s.deviceId, storeName: s.storeName };
@@ -47,6 +47,14 @@ export async function syncNow({ pull = true } = {}) {
       if (!any) break;
       const res = await post(s.webhookUrl, payload);
       const markable = syncedTables(res.features, tables);
+      // The script was just updated: qarz sales / shifts it took earlier lost their qarz columns, so queue them once more.
+      if (s.qarzScriptMissing && !resent && markable.includes('ledger')) {
+        resent = true;
+        for (const t of ['sales', 'shifts']) {
+          const keys = (await db[t].where('synced').equals(1).filter((r) => needsQarzResend(t, r)).primaryKeys());
+          for (const k of keys) await db[t].update(k, { synced: 0 });
+        }
+      }
       if (markable.length < tables.length) {
         qarzWaiting = qarzWaiting || tables.some((t) => !markable.includes(t) && payload[t]?.length);
         tables = markable;

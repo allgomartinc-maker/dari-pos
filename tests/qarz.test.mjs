@@ -93,3 +93,27 @@ test('void of a plain cash sale: nothing for qarz', async () => {
   const { voidQarzEffects } = await import('../js/qarz.js');
   assert.deepEqual(voidQarzEffects({ total: 100 }), { ledger: [], drawerOut: 0 });
 });
+
+test('review fix: voiding a sale whose extra cash paid old qarz undoes "collected", not "given"', () => {
+  const r = dayRange('2026-11-02', '2026-11-03');
+  const at = new Date('2026-11-02T12:00:00').toISOString();
+  const list = [e('a', 'payment', -50000, at), e('a', 'void', 50000, at)];
+  assert.deepEqual(qarzTotals(list, r), { given: 0, collected: 0 });
+});
+
+test('review fix: duplicate name check ignores case and extra spaces, and skips the customer being edited', async () => {
+  const { sameNameExists } = await import('../js/qarz.js');
+  const list = [{ id: 'a', name: 'Ahmad  Khan' }, { id: 'b', name: 'Gul', deleted: 1 }];
+  assert.equal(sameNameExists(list, ' ahmad khan '), true);
+  assert.equal(sameNameExists(list, 'ahmad khan', 'a'), false);
+  assert.equal(sameNameExists(list, 'gul'), false);
+  assert.equal(sameNameExists(list, ''), false);
+});
+
+test('review fix: manager approval only when this sale adds qarz above the limit', async () => {
+  const { needsLimitApproval } = await import('../js/qarz.js');
+  const c = { limit: 100000 };
+  assert.equal(needsLimitApproval(c, splitQarzPayment({ total: 50000, cash: 100000, balance: 200000 })), false); // paying down
+  assert.equal(needsLimitApproval(c, splitQarzPayment({ total: 50000, cash: 0, balance: 80000 })), true);       // 800 → 1,300
+  assert.equal(needsLimitApproval(c, splitQarzPayment({ total: 50000, cash: 0, balance: 0 })), false);          // 500 ≤ 1,000
+});

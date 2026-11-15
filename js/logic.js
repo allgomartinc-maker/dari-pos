@@ -481,3 +481,10 @@ const QARZ_TABLES = ['customers', 'ledger'];
 export function syncedTables(features, tables) {
   return (features || []).includes('qarz') ? tables : tables.filter((t) => !QARZ_TABLES.includes(t));
 }
+
+/** Rows an older script already took but whose qarz columns it dropped: send again once the script knows qarz (upsert by ID, so no duplicates). */
+export function needsQarzResend(table, row) {
+  if (table === 'sales') return !!row.customerId;
+  if (table === 'shifts') return !!row.qarzIn;
+  return false;
+}

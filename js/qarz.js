@@ -66,8 +66,9 @@ export function qarzTotals(entries, range) {
   let given = 0, collected = 0;
   for (const x of entries) {
     if (x.timestamp < a || x.timestamp >= b) continue;
-    if (x.type === 'sale' || x.type === 'void') given += x.amount;
-    else if (x.type === 'payment') collected -= x.amount;
+    // A negative void undoes qarz given; a positive void undoes a payment (extra cash handed back).
+    if (x.type === 'sale' || (x.type === 'void' && x.amount < 0)) given += x.amount;
+    else if (x.type === 'payment' || (x.type === 'void' && x.amount > 0)) collected -= x.amount;
   }
   return { given, collected };
 }
@@ -91,4 +92,15 @@ export function voidQarzEffects(sale) {
   if (sale.credit) ledger.push(-sale.credit);
   if (sale.overpaidToQarz) ledger.push(sale.overpaidToQarz);
   return { ledger, drawerOut: sale.overpaidToQarz || 0 };
+}
+
+/** Is there already a (not deleted) customer with this name? Case and extra spaces ignored; `exceptId` skips the one being edited. */
+export function sameNameExists(customers, name, exceptId) {
+  const n = norm(name);
+  return !!n && customers.some((c) => !c.deleted && c.id !== exceptId && norm(c.name) === n);
+}
+
+/** Manager approval only when this sale puts new qarz on an account that ends above its limit (paying down never needs it). */
+export function needsLimitApproval(customer, split) {
+  return split.credit > 0 && overLimit(customer, split.newBalance);
 }
