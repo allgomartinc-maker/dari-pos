@@ -415,3 +415,22 @@ input:focus, select:focus, textarea:focus { border-color: var(--primary-2); outl
 .btn.choice span { display: flex; flex-direction: column; gap: 2px; }
 .btn.choice b { font-size: 1.1rem; }
 .btn.choice small { font-weight: 500; opacity: .8; font-size: .85rem; line-height: 1.4; }
+
+/* ---------- qarz ---------- */
+.qarz-btn { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.qarz-btn:disabled { opacity: .45; }
+.qarz-btn .ico { width: 22px; height: 22px; }
+.qarz-sheet h2 { display: flex; align-items: center; gap: 8px; }
+.cust-list { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; max-height: 46vh; overflow-y: auto; overscroll-behavior: contain; }
+.cust-row { justify-content: space-between; text-align: start; min-height: 56px; background: var(--surface); }
+.cust-row span:first-child { display: flex; flex-direction: column; align-items: flex-start; }
+.cust-row small { font-weight: 500; color: var(--muted); font-size: .8rem; }
+.owed-by-shop { color: var(--ok); font-weight: 800; }
+.qarz-now { display: flex; justify-content: space-between; align-items: baseline; padding: 8px 2px; border-bottom: 1px solid var(--border); }
+.qarz-now b { font-size: 1.15rem; }
+.qarz-split { display: flex; flex-direction: column; gap: 4px; background: var(--surface-2); border-radius: 12px; padding: 12px 14px; font-weight: 600; }
+.qarz-split .add { color: var(--warn); }
+.qarz-split .paid { color: var(--ok); }
+.qarz-split .total { font-size: 1.15rem; margin-top: 4px; }
+.qarz-split .warn { color: var(--danger); font-size: .9rem; }
+.change-box.qarz-done.owes { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); }

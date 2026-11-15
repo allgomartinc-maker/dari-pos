@@ -13,6 +13,7 @@ import { receiptDoc, zReportDoc, labelDoc, printHtml, printBluetooth, connectBlu
 import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep, warmUpScanner, decoderName, upcVariants } from './scanner.js';
 import { $, $$, esc, toast, modal, confirmBox, formBox, keypadHtml, bindPinPad, askPin, download, pickFile } from './ui.js';
 import { icon } from './icons.js';
+import { balanceOf, balancesById, splitQarzPayment, overLimit, findCustomers, ledgerEntry } from './qarz.js';
 
 // On screen the word «افغانی» is drawn small after the number; plain text (toasts, confirms, receipts) uses formatMoney.
 const m = (p) => `${formatNumber(p)} <small class="cur">افغانی</small>`;
@@ -407,6 +408,7 @@ async function renderRegister() {
         </div>
         <div id="changeBox" class="change-box"><div>باقی پول مشتری</div><div class="v num" id="changeDue"></div></div>
         <button class="btn primary big block" id="completeBtn">✔ تکمیل فروش</button>
+        <button class="btn big block qarz-btn" id="qarzBtn">${icon('wallet')} قرض — به حساب مشتری</button>
         <div class="row"><button class="btn grow" id="clearTender">پاک کردن پول</button><button class="btn grow" id="clearCart">لغو سبد</button></div>
       </div>
     </div>
@@ -433,6 +435,7 @@ async function renderRegister() {
   $('#clearTender').onclick = () => { state.tendered = ''; $('#tendered').value = ''; drawPay(); };
   $('#clearCart').onclick = async () => { if (state.cart.length && await confirmBox('سبد خرید خالی شود؟')) { state.cart = []; state.tendered = ''; renderRegister(); } };
   $('#completeBtn').onclick = completeSale;
+  $('#qarzBtn').onclick = startQarzSale;
   $('#payJump').onclick = () => { $('.pay').scrollIntoView({ behavior: 'smooth', block: 'start' }); setTimeout(() => $('#tendered')?.focus({ preventScroll: true }), 350); };
   // Hide the floating pay bar while the pay panel itself is on screen.
   if ('IntersectionObserver' in window) {
@@ -548,6 +551,7 @@ function drawPay() {
   box.firstElementChild.textContent = !ch.ok && tendered > 0 ? 'کمبود پول' : 'باقی پول مشتری';
   $('#changeDue').innerHTML = m(tendered === 0 ? 0 : ch.ok ? ch.change : ch.short);
   $('#completeBtn').disabled = !state.cart.length || !ch.ok || tendered === 0;
+  $('#qarzBtn').disabled = !state.cart.length;
   const pj = $('#payJump');
   if (pj) {
     pj.classList.toggle('hidden', !state.cart.length || !!state.payVisible);
@@ -605,15 +609,25 @@ async function completeSale() {
     }
   });
   if (practice) toast('🧪 فروش تمرینی — به گزارش و گوگل شیت نمی‌رود');
+  afterSale(sale);
+}
+
+/** After any finished sale (cash or qarz): clear the cart, sync, print if set, and show the done screen. */
+function afterSale(sale) {
   beep('done');
   state.cart = []; state.tendered = '';
   renderRegister();
   refreshBadge();
   if (navigator.onLine) syncNow({ pull: false }).then(refreshBadge);
   if (state.s.autoPrint) printHtml(receiptDoc(sale, state.s), state.s.paperWidth);
+  const owes = sale.balanceAfter || 0;
+  const box = !sale.customerId
+    ? `<div class="change-box"><div>باقی پول مشتری</div><div class="v num">${m(sale.changeGiven)}</div></div>`
+    : `<div class="change-box qarz-done ${owes < 0 ? '' : 'owes'}"><div>${owes < 0 ? 'دکان بدهکار است به' : 'مانده کل قرض'} — ${esc(sale.customerName)}</div><div class="v num">${m(Math.abs(owes))}</div>
+        ${sale.credit ? `<div class="small">قرض این رسید: ${m(sale.credit)}</div>` : ''}${sale.overpaidToQarz ? `<div class="small">از قرض کم شد: ${m(sale.overpaidToQarz)}</div>` : ''}</div>`;
   modal(`<h2>فروش ثبت شد ✔</h2>
-    <div class="change-box"><div>باقی پول مشتری</div><div class="v num">${m(sale.changeGiven)}</div></div>
-    <p class="muted">رسید <span class="ltr">${esc(sale.receiptId)}</span> · مجموع ${m(sale.total)} · دریافتی ${m(sale.cashReceived)}</p>
+    ${box}
+    <p class="muted">رسید <span class="ltr">${esc(sale.receiptId)}</span> · مجموع ${m(sale.total)} · دریافتی ${m(sale.cashReceived + (sale.overpaidToQarz || 0))}</p>
     <div class="actions">
       <button class="btn primary grow" data-new autofocus>فروش جدید</button>
       <button class="btn" data-print>🖨 چاپ رسید</button>
@@ -625,6 +639,136 @@ async function completeSale() {
       box.querySelector('[data-bt]')?.addEventListener('click', () => btPrint(receiptDoc(sale, state.s)));
     }
   });
+}
+
+// ====================================================================== qarz at checkout
+async function startQarzSale() {
+  if (!state.cart.length) return;
+  if (isPracticeSale(state.cart)) return toast('اجناس تمرینی را نمی‌توان قرض داد', 'err');
+  const shift = await openShift();
+  if (!shift) return toast('شفت باز نیست', 'err');
+  const { total } = cartTotals(state.cart);
+  const pick = await askQarzCustomer(total);
+  if (pick) await completeQarzSale({ ...pick, shift, total });
+}
+
+const newCustomer = (name, phone) => ({ id: randomId(), name: name.trim(), phone: toLatin(phone || ''), limit: 0, note: '', createdAt: now(), updatedAt: now(), synced: 0 });
+
+/** Pick (or add) the customer and how much cash they hand over now. Resolves { customer, cash, balance } or null. */
+function askQarzCustomer(total) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v, close) => { if (done) return; done = true; close(); resolve(v); };
+    modal('<div class="qarz-sheet"></div>', {
+      dismiss: false,
+      onMount: async (box, close) => {
+        const root = box.querySelector('.qarz-sheet');
+        const customers = await db.customers.toArray();
+        const balances = balancesById(await db.ledger.toArray());
+        const bal = (c) => balances.get(c.id)?.balance || 0;
+        const owesHtml = (b) => b < 0 ? `<span class="owed-by-shop">دکان بدهکار است ${m(-b)}</span>` : m(b);
+
+        const listView = (q = '') => {
+          const found = findCustomers(customers, q, balances).slice(0, 40);
+          root.innerHTML = `<h2>${icon('wallet')} قرض — مجموع ${m(total)}</h2>
+            <input id="qSearch" placeholder="نام یا تلفن مشتری" autocomplete="off" value="${esc(q)}">
+            <div class="cust-list">${found.map((c) => `<button class="btn cust-row" data-id="${esc(c.id)}"><span><b>${esc(c.name)}</b>${c.phone ? `<small class="ltr">${esc(c.phone)}</small>` : ''}</span><span class="num">${owesHtml(bal(c))}</span></button>`).join('')
+              || `<p class="muted">${q ? 'پیدا نشد' : 'هنوز مشتری قرضی نیست'}</p>`}</div>
+            <div class="actions"><button class="btn primary grow" data-new>+ مشتری نو</button><button class="btn" data-no>لغو</button></div>`;
+          const inp = root.querySelector('#qSearch');
+          inp.oninput = () => { const v = inp.value; listView(v); const i = root.querySelector('#qSearch'); i.focus(); i.setSelectionRange(v.length, v.length); };
+          root.querySelector('.cust-list').onclick = (e) => { const id = e.target.closest('[data-id]')?.dataset.id; if (id) cashView(customers.find((c) => c.id === id)); };
+          root.querySelector('[data-new]').onclick = () => newView(inp.value);
+          root.querySelector('[data-no]').onclick = () => finish(null, close);
+        };
+
+        const newView = (name = '') => {
+          root.innerHTML = `<h2>مشتری نو</h2><form class="stack" id="ncf">
+            <label class="field">نام<input name="name" required autocomplete="off" value="${esc(name)}"></label>
+            <label class="field">تلفن (اختیاری)<input name="phone" inputmode="tel" autocomplete="off" class="ltr"></label>
+            <p class="muted small" id="dupWarn"></p>
+            <div class="actions"><button class="btn primary grow" type="submit">ذخیره</button><button class="btn" type="button" data-back>برگشت</button></div></form>`;
+          const f = root.querySelector('#ncf');
+          const dup = () => { const n = f.name.value.trim().toLowerCase(); const hit = n && customers.find((c) => !c.deleted && c.name.trim().toLowerCase() === n);
+            root.querySelector('#dupWarn').textContent = hit ? '⚠ این نام قبلاً هست — اگر همان شخص است، از فهرست انتخاب کنید' : ''; };
+          f.name.oninput = dup; dup();
+          root.querySelector('[data-back]').onclick = () => listView(name);
+          f.onsubmit = async (e) => {
+            e.preventDefault();
+            if (!f.name.value.trim()) return;
+            const c = newCustomer(f.name.value, f.phone.value);
+            await db.customers.put(c); customers.push(c);
+            cashView(c);
+          };
+          f.name.focus();
+        };
+
+        const cashView = (c) => {
+          const b = bal(c);
+          root.innerHTML = `<h2>${esc(c.name)}</h2>
+            <div class="qarz-now"><span>قرض قبلی</span><b class="num">${owesHtml(b)}</b></div>
+            <div class="qarz-now"><span>این خرید</span><b class="num">${m(total)}</b></div>
+            <label class="field">نقد حالا (اگر چیزی می‌دهد)<input id="qCash" inputmode="decimal" autocomplete="off" placeholder="۰" value="${esc(state.tendered)}"></label>
+            <div class="qarz-split" id="qSplit"></div>
+            <div class="actions"><button class="btn primary grow" data-ok>✔ ثبت</button><button class="btn" data-back>برگشت</button></div>`;
+          const cash = root.querySelector('#qCash');
+          const draw = () => {
+            const r = splitQarzPayment({ total, cash: parseMoney(cash.value), balance: b });
+            root.querySelector('#qSplit').innerHTML = [
+              r.cashReceived ? `<div>${m(r.cashReceived)} برای این خرید ✔</div>` : '',
+              r.credit ? `<div class="add">${m(r.credit)} به قرض اضافه شد</div>` : '',
+              r.overpaid ? `<div class="paid">${m(r.overpaid)} از قرض کم شد ✔</div>` : '',
+              `<div class="total">${r.newBalance < 0 ? 'دکان بدهکار است' : 'مانده کل قرض'}: <b class="num">${m(Math.abs(r.newBalance))}</b></div>`,
+              overLimit(c, r.newBalance) ? `<div class="warn">بیش از حد قرض این مشتری (${m(c.limit)}) — تأیید مدیر لازم است</div>` : ''
+            ].join('');
+          };
+          cash.oninput = draw; draw();
+          root.querySelector('[data-back]').onclick = () => listView();
+          root.querySelector('[data-ok]').onclick = () => finish({ customer: c, cash: parseMoney(cash.value), balance: b }, close);
+        };
+
+        listView();
+      }
+    });
+  });
+}
+
+async function completeQarzSale({ customer, cash, balance, shift, total }) {
+  const r = splitQarzPayment({ total, cash, balance });
+  if (r.overBalance && !(await confirmBox('بیشتر از قرض است — باز هم ثبت شود؟ (دکان به مشتری بدهکار می‌شود)'))) return;
+  let limitApprovedBy;
+  if (overLimit(customer, r.newBalance)) {
+    const a = await requireAdmin('بیش از حد قرض این مشتری — تأیید مدیر');
+    if (!a) return;
+    limitApprovedBy = a.name;
+  }
+  const seq = await nextSeq('receiptSeq');
+  const ts = now();
+  const receiptId = makeReceiptId(state.s.deviceId, seq);
+  const sale = {
+    receiptId, shiftId: shift.shiftId, cashierId: state.user.id, cashierName: state.user.name,
+    timestamp: ts, items: state.cart.map((l) => ({ ...l })), total, cashReceived: r.cashReceived, changeGiven: 0,
+    credit: r.credit, overpaidToQarz: r.overpaid, customerId: customer.id, customerName: customer.name,
+    voided: 0, synced: 0, updatedAt: ts, ...(limitApprovedBy ? { limitApprovedBy } : {})
+  };
+  await db.transaction('rw', [db.sales, db.products, db.ledger, db.movements, db.customers], async () => {
+    // Balance read inside the transaction, so the receipt's "still owes" is exact.
+    sale.balanceAfter = balanceOf(await db.ledger.where('customerId').equals(customer.id).toArray(), customer.id) + r.credit - r.overpaid;
+    await db.sales.add(sale);
+    for (const l of sale.items) {
+      const p = await db.products.get(l.barcode);
+      if (p) await db.products.update(l.barcode, { stock: addQty(p.stock, -l.qty), updatedAt: ts, synced: p.demo ? 1 : 0 });
+    }
+    const by = state.user.name;
+    if (r.credit) await db.ledger.add(ledgerEntry({ customer, type: 'sale', amount: r.credit, receiptId, shiftId: shift.shiftId, by }));
+    if (r.overpaid) {
+      await db.ledger.add(ledgerEntry({ customer, type: 'payment', amount: -r.overpaid, receiptId, shiftId: shift.shiftId, by }));
+      await db.movements.add({ id: randomId(), shiftId: shift.shiftId, type: 'qarz', amount: r.overpaid, note: customer.name, userName: by,
+        approvedBy: '', timestamp: ts, updatedAt: ts, synced: 0 });
+    }
+    await db.customers.update(customer.id, { updatedAt: ts, synced: 0 });
+  });
+  afterSale(sale);
 }
 
 async function btPrint(doc) {
