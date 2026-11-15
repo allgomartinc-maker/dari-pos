@@ -26,12 +26,42 @@ export function receiptDoc(sale, s) {
   }
   d.push({ t: 'hr2' },
     { t: 'row', a: 'مجموع:', b: formatMoney(sale.total), bold: true, size: 'lg' },
-    { t: 'row', a: 'نقد دریافتی:', b: formatMoney(sale.cashReceived) },
-    { t: 'row', a: 'باقی:', b: formatMoney(sale.changeGiven), bold: true },
+    ...(sale.customerId ? qarzRows(sale) : [
+      { t: 'row', a: 'نقد دریافتی:', b: formatMoney(sale.cashReceived) },
+      { t: 'row', a: 'باقی:', b: formatMoney(sale.changeGiven), bold: true }]),
     { t: 'hr' },
     { t: 'qr', text: receiptQr(sale) },
     { t: 'text', text: s.receiptFooter, align: 'center' });
   return d.filter(Boolean);
+}
+
+// Qarz sale: cash handed over (purchase + any extra toward old qarz), what went on / came off the account,
+// and the balance at that moment (stored on the sale, so a reprint shows the same number). Never the phone.
+function qarzRows(sale) {
+  const owes = sale.balanceAfter || 0;
+  return [
+    { t: 'row', a: 'نقد دریافتی:', b: formatMoney(sale.cashReceived + (sale.overpaidToQarz || 0)) },
+    sale.credit && { t: 'row', a: 'قرض این رسید:', b: formatMoney(sale.credit) },
+    sale.overpaidToQarz && { t: 'row', a: 'از قرض کم شد:', b: formatMoney(sale.overpaidToQarz) },
+    { t: 'row', a: owes < 0 ? `دکان بدهکار است — ${sale.customerName}:` : `مانده کل قرض — ${sale.customerName}:`, b: formatMoney(Math.abs(owes)), bold: true }
+  ].filter(Boolean);
+}
+
+/** Slip for money received against a customer's qarz. */
+export function paymentSlipDoc(entry, balanceAfter, s) {
+  return [
+    { t: 'text', text: s.storeName, size: 'xl', bold: true, align: 'center' },
+    { t: 'text', text: 'رسید دریافت قرض', bold: true, align: 'center' },
+    { t: 'hr' },
+    { t: 'row', a: 'مشتری:', b: entry.customerName },
+    { t: 'row', a: 'تاریخ:', b: dariDate(entry.timestamp) },
+    entry.by && { t: 'row', a: 'دریافت کننده:', b: entry.by },
+    { t: 'hr2' },
+    { t: 'row', a: 'دریافت شد:', b: formatMoney(-entry.amount), bold: true, size: 'lg' },
+    { t: 'row', a: balanceAfter < 0 ? 'دکان بدهکار است:' : 'مانده:', b: formatMoney(Math.abs(balanceAfter)), bold: true },
+    { t: 'hr' },
+    { t: 'text', text: s.receiptFooter, align: 'center' }
+  ].filter(Boolean);
 }
 
 export function zReportDoc(shift, s) {
@@ -56,6 +86,7 @@ export function zReportDoc(shift, s) {
     { t: 'row', a: 'پول آغاز شفت:', b: formatMoney(shift.startingFloat) },
     { t: 'row', a: '+ فروش خالص:', b: formatMoney(shift.netCash) },
     { t: 'row', a: '+ پول اضافه شده:', b: formatMoney(shift.payins) },
+    shift.qarzIn && { t: 'row', a: 'دریافت قرض:', b: formatMoney(shift.qarzIn) },
     { t: 'row', a: '- برداشت به گاوصندوق:', b: formatMoney(shift.drops) },
     { t: 'row', a: '- مصارف:', b: formatMoney(shift.payouts) },
     { t: 'row', a: 'متوقع در دخل:', b: formatMoney(shift.expectedCash), bold: true },
@@ -73,7 +104,7 @@ export function zReportDoc(shift, s) {
     { t: 'text', text: 'امضای صندوقدار: ______________' },
     { t: 'text', text: 'امضای مدیر: ______________' },
     { t: 'text', text: '*** پایان سند ***', align: 'center' });
-  return d;
+  return d.filter(Boolean);
 }
 
 export function labelDoc(p) {
