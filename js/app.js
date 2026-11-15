@@ -13,12 +13,13 @@ import { receiptDoc, paymentSlipDoc, zReportDoc, labelDoc, printHtml, printBluet
 import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep, warmUpScanner, decoderName, upcVariants } from './scanner.js';
 import { $, $$, esc, toast, modal, confirmBox, formBox, keypadHtml, bindPinPad, askPin, download, pickFile } from './ui.js';
 import { icon } from './icons.js';
+import { SIDES, sideOf, navFor, firstViewOf } from './nav.js';
 import { balanceOf, balancesById, splitQarzPayment, overLimit, findCustomers, ledgerEntry, statementText, LEDGER_LABEL, voidQarzEffects, qarzTotals, sameNameExists, needsLimitApproval } from './qarz.js';
 
 // On screen the word «افغانی» is drawn small after the number; plain text (toasts, confirms, receipts) uses formatMoney.
 const m = (p) => `${formatNumber(p)} <small class="cur">افغانی</small>`;
 const now = () => new Date().toISOString();
-const state = { user: null, s: null, view: 'register', cart: [], tendered: '', batch: null, item: null };
+const state = { user: null, s: null, view: 'register', lastBy: {}, cart: [], tendered: '', batch: null, item: null };
 
 // [id, label, role, short label for the phone tab bar, icon]
 const VIEWS = [
@@ -333,10 +334,27 @@ function renderShell() {
   $('#topbar').classList.remove('hidden');
   $('#storeTitle').textContent = state.s.storeName;
   $('#userChip').textContent = `${state.user.name} · ${isAdmin() ? 'مدیر' : 'صندوقدار'}`;
-  $('#nav').innerHTML = VIEWS.filter(([, , r]) => r === 'cashier' || isAdmin())
-    .map(([id, label, , short, ic]) => `<button data-view="${id}"><span class="ni">${icon(ic)}</span><span class="nl">${label}</span><span class="ns">${short}</span></button>`).join('');
-  $('#nav').onclick = (e) => { const v = e.target.closest('[data-view]')?.dataset.view; if (v) go(v); };
+  $('#nav').onclick = (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    if (b.dataset.side) return go(firstViewOf(b.dataset.side, state.lastBy));
+    if (b.dataset.view) go(b.dataset.view);
+  };
+  drawNav();
   refreshBadge();
+}
+
+// The bar shows one side of the shop at a time (max 5 buttons on a phone); managers get one big button to switch sides.
+function drawNav() {
+  const n = navFor(state.user?.role, state.view);
+  const tab = (id) => {
+    const [, label, , short, ic] = VIEWS.find((v) => v[0] === id);
+    return `<button data-view="${id}" class="${id === state.view ? 'active' : ''}"><span class="ni">${icon(ic)}</span><span class="nl">${label}</span><span class="ns">${short}</span></button>`;
+  };
+  const to = n.switchTo && SIDES[n.switchTo];
+  const sw = to ? `<button class="nav-switch" data-side="${n.switchTo}" aria-label="رفتن به ${to.label}"><span class="ni">${icon(to.icon)}</span><span class="nl">${to.label}</span><span class="ns">${to.short}</span></button>` : '';
+  $('#nav').innerHTML = n.tabs.map(tab).join('') + sw;
+  document.body.classList.toggle('side-back', n.side === 'back');
+  $('#sideName').textContent = isAdmin() ? SIDES[n.side].label : '';
 }
 
 async function go(view) {
@@ -344,7 +362,8 @@ async function go(view) {
   if (!def || (def[2] === 'admin' && !isAdmin())) view = 'register';
   await stopCamera();
   state.view = view;
-  $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
+  state.lastBy[sideOf(view)] = view;
+  drawNav();
   ({ register: renderRegister, qarz: renderQarz, shift: renderShift, receive: renderReceive, products: renderProducts, reports: renderReports, settings: renderSettings })[view]();
 }
 

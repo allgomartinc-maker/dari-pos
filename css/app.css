@@ -444,3 +444,22 @@ table.ledger td.add { color: var(--warn); font-weight: 700; }
 table.ledger td.paid { color: var(--ok); font-weight: 700; }
 table.ledger tr.link { cursor: pointer; }
 .qarz-page #qFind { flex: 1; min-width: 0; }
+
+/* ---------- two sides of the shop: front (selling) and back (managing) ---------- */
+:root { --back-bar: #0b5c52; }
+:root[data-theme="dark"] { --back-bar: #0f4a43; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --back-bar: #0f4a43; } }
+.brand-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
+.brand-text #storeTitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-name { font-size: .72rem; font-weight: 700; opacity: .85; }
+.side-name:empty { display: none; }
+body.side-back .topbar { background: var(--back-bar); }
+.nav .nav-switch {
+  background: var(--accent); color: var(--accent-ink); font-weight: 800; margin-inline-start: auto;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.nav .nav-switch:hover { filter: brightness(1.05); }
+@media (max-width: 900px) {
+  .nav .nav-switch { flex: 1.25 1 0; margin-inline-start: 4px; color: var(--accent-ink); }
+  body.side-back .nav button.active { background: color-mix(in srgb, var(--back-bar) 14%, var(--surface)); color: var(--back-bar); }
+}
