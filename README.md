@@ -131,3 +131,15 @@ The file is `.txt` because Android's share menu refuses `.json` files. Restore k
 - **Reports:** qarz given, qarz collected and total owed, for the chosen dates.
 - **Google Sheet:** `Qarz_Customers` and `Qarz_Ledger` tabs. **The owner must re-paste `apps-script/Code.gs`, run `setup`, and deploy a new version.** Until then qarz rows wait on the phone, nothing is lost, and Settings shows a warning.
 - **Limits:** qarz lives on one phone. A second till made with the phone move starts with no customers.
+
+## Easy Sheet setup: template + QR (for setting up a shop)
+
+1. Open the template's **Make a copy** link (see below) and copy it into the shop's Google account (or yours).
+2. In the copy: menu **«صندوق دری» › «راه‌اندازی»** → Allow on Google's permission screen (Advanced › Go to … is normal for your own script).
+3. **Extensions › Apps Script › Deploy › New deployment › ⚙ Web app**, then Execute as **Me**, Who has access **Anyone** › Deploy.
+4. Menu **«صندوق دری» › «QR اتصال»** shows a QR.
+5. On the phone: **Settings › «اتصال با QR»** → scan it. The app saves the address and key and syncs once.
+
+The QR is drawn inside the Sheet's own dialog (qrcode-generator, MIT, from cdnjs), so the key never goes to a QR website. The QR is the shop's key: don't show it to anyone else.
+
+Template link: _to be added once the template Sheet exists._

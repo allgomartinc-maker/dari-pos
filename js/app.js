@@ -2,7 +2,7 @@
 import {
   formatMoney, formatNumber, parseMoney, parseIntSafe, toDariDigits, cartTotals, changeDue, marginPct, QUICK_CASH,
   AFN_DENOMS, countDenoms, shiftExpected, varianceStatus, makeReceiptId, parseReceiptQr, eanValid, normalizeBarcode, looksLikeBarcode,
-  randomId, internalBarcode, toCsv, parseCsv, dariDate, timeAgo, backupDue, stampPrice, cartMixError, isPracticeSale, realSales, installMode, cleanBackup, nextDeviceId, prepareSecondTill, dayRange, summarizeSales, reportText, reportCsv, solarMonthStart, isoDay, parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount, round3
+  randomId, internalBarcode, toCsv, parseCsv, dariDate, timeAgo, backupDue, stampPrice, cartMixError, isPracticeSale, realSales, installMode, parsePairing, cleanBackup, nextDeviceId, prepareSecondTill, dayRange, summarizeSales, reportText, reportCsv, solarMonthStart, isoDay, parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount, round3
 } from './logic.js';
 import {
   db, getSettings, setSetting, nextSeq, createUser, setUserPin, findUserByPin, pinInUse, openShift, pendingCount,
@@ -942,6 +942,40 @@ async function deleteCustomer(c, bal) {
   return true;
 }
 
+// ====================================================================== pair with the Google Sheet by QR
+function pairByQr() {
+  modal(`<h2>${icon('camera')} اتصال با QR</h2>
+    <p class="muted">QR را از منوی «صندوق دری» › «QR اتصال» در گوگل شیت باز کنید و جلوی کمره بگیرید.</p>
+    <div id="pairCam" class="cam"></div>
+    <div class="actions"><button class="btn" data-no>لغو</button></div>`, {
+    dismiss: false,
+    onMount: async (box, close) => {
+      let busy = false;
+      const stop = async () => { await stopCamera(); close(); };
+      box.querySelector('[data-no]').onclick = stop;
+      const onCode = async (code) => {
+        if (busy) return;
+        const p = parsePairing(code);
+        if (!p) return toast('این QR اتصال نیست — QR را از منوی «صندوق دری» باز کنید', 'err');
+        busy = true;
+        await stop();
+        await setSetting('webhookUrl', p.url);
+        await setSetting('syncToken', p.token);
+        state.s = await getSettings();
+        toast('وصل شد — در حال همگام‌سازی…', 'ok');
+        const r = await syncNow();
+        if (r.ok) toast(`✔ گوگل شیت وصل است (${toDariDigits(r.sent)} ریکارد فرستاده شد)`, 'ok');
+        else if (r.reason === 'offline') toast('ذخیره شد. انترنت وصل نیست — بعداً خودش همگام می‌کند');
+        else toast('ذخیره شد، اما همگام نشد: ' + (r.error || ''), 'err');
+        refreshBadge();
+        if (state.view === 'settings') renderSettings();
+      };
+      try { await startCamera('pairCam', onCode, { isKnown: async (c) => !!parsePairing(c) }); }
+      catch (err) { toast('کمره باز نشد: اجازه کمره را بدهید', 'err'); console.warn(err); }
+    }
+  });
+}
+
 async function btPrint(doc) {
   try { await printBluetooth(doc, state.s.paperWidth); toast('چاپ شد', 'ok'); }
   catch (err) { toast('چاپ بلوتوث ناموفق: ' + err.message, 'err'); }
@@ -1587,6 +1621,8 @@ async function renderSettings() {
           <li>شمارش و اصلاح موجودی را فقط در یک دستگاه (دستگاه اصلی) انجام دهید.</li>
           <li>برای شروع، یک دستگاه در هر دوکان پیشنهاد می‌شود.</li>
         </ul></details>
+      <button class="btn primary big block" type="button" id="pairQr">${icon('camera')} اتصال با QR — QR گوگل شیت را اسکن کنید</button>
+      <p class="muted small">در گوگل شیت: منوی «صندوق دری» › «QR اتصال». یا آدرس و کلید را دستی بنویسید:</p>
       <label class="field">آدرس Web App (Apps Script)<input name="webhookUrl" value="${esc(s.webhookUrl)}" class="ltr" placeholder="https://script.google.com/macros/s/.../exec"></label>
       <label class="field">کلید امنیتی (همان SYNC_TOKEN در Apps Script)<input name="syncToken" value="${esc(s.syncToken)}" class="ltr" type="password" autocomplete="off"></label>
       <div class="row"><button class="btn primary" type="submit">ذخیره تنظیمات</button><button class="btn" type="button" id="syncBtn">همگام‌سازی اکنون</button>
@@ -1665,6 +1701,7 @@ async function renderSettings() {
   $('#btConnect')?.addEventListener('click', async () => { try { toast('وصل شد: ' + (await connectBluetooth()), 'ok'); renderSettings(); } catch (err) { toast(err.message, 'err'); } });
   $('#btTest')?.addEventListener('click', () => btPrint(receiptDoc(sample, state.s)));
   $('#backup').onclick = async () => { await doBackup(); renderSettings(); };
+  $('#pairQr').onclick = pairByQr;
   $('#moveOut').onclick = async () => {
     const data = await exportBackup();
     const file = new File([JSON.stringify(data)], `dari-pos-move-${state.s.deviceId}-${new Date().toISOString().slice(0, 10)}.txt`, { type: 'text/plain' });

@@ -1,5 +1,5 @@
 // Service worker: caches the whole app so it opens and runs with no internet.
-const VERSION = 'dari-pos-v19';
+const VERSION = 'dari-pos-v20';
 const SHARE_CACHE = 'dari-pos-shared'; // a move file shared from WhatsApp waits here until the app opens
 const ASSETS = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
