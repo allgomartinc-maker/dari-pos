@@ -9,11 +9,11 @@ import {
   exportBackup, importBackup, requestPersistentStorage
 } from './db.js';
 import { syncNow, startAutoSync, onSyncChange, pullUsers, pullProducts, takeSheetVersion, keepLocalVersion } from './sync.js';
-import { receiptDoc, zReportDoc, labelDoc, printHtml, printBluetooth, connectBluetooth, bluetoothSupported, bluetoothName } from './print.js';
+import { receiptDoc, paymentSlipDoc, zReportDoc, labelDoc, printHtml, printBluetooth, connectBluetooth, bluetoothSupported, bluetoothName } from './print.js';
 import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep, warmUpScanner, decoderName, upcVariants } from './scanner.js';
 import { $, $$, esc, toast, modal, confirmBox, formBox, keypadHtml, bindPinPad, askPin, download, pickFile } from './ui.js';
 import { icon } from './icons.js';
-import { balanceOf, balancesById, splitQarzPayment, overLimit, findCustomers, ledgerEntry } from './qarz.js';
+import { balanceOf, balancesById, splitQarzPayment, overLimit, findCustomers, ledgerEntry, statementText, LEDGER_LABEL } from './qarz.js';
 
 // On screen the word «افغانی» is drawn small after the number; plain text (toasts, confirms, receipts) uses formatMoney.
 const m = (p) => `${formatNumber(p)} <small class="cur">افغانی</small>`;
@@ -23,6 +23,7 @@ const state = { user: null, s: null, view: 'register', cart: [], tendered: '', b
 // [id, label, role, short label for the phone tab bar, icon]
 const VIEWS = [
   ['register', 'فروش', 'cashier', 'فروش', 'cart'],
+  ['qarz', 'قرض', 'cashier', 'قرض', 'wallet'],
   ['shift', 'شفت', 'cashier', 'شفت', 'cash'],
   ['receive', 'دریافت جنس', 'admin', 'دریافت', 'box'],
   ['products', 'اجناس', 'admin', 'اجناس', 'tag'],
@@ -342,7 +343,7 @@ async function go(view) {
   await stopCamera();
   state.view = view;
   $$('#nav button').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
-  ({ register: renderRegister, shift: renderShift, receive: renderReceive, products: renderProducts, reports: renderReports, settings: renderSettings })[view]();
+  ({ register: renderRegister, qarz: renderQarz, shift: renderShift, receive: renderReceive, products: renderProducts, reports: renderReports, settings: renderSettings })[view]();
 }
 
 function onScan(code) {
@@ -439,7 +440,8 @@ async function renderRegister() {
   $('#payJump').onclick = () => { $('.pay').scrollIntoView({ behavior: 'smooth', block: 'start' }); setTimeout(() => $('#tendered')?.focus({ preventScroll: true }), 350); };
   // Hide the floating pay bar while the pay panel itself is on screen.
   if ('IntersectionObserver' in window) {
-    const io = new IntersectionObserver(([en]) => { state.payVisible = en.isIntersecting; drawPay(); }, { threshold: 0.15 });
+    // Stops itself once the sale screen is gone (another tab was opened), so it never draws into a missing panel.
+    const io = new IntersectionObserver(([en]) => { if (!en.target.isConnected) return io.disconnect(); state.payVisible = en.isIntersecting; drawPay(); }, { threshold: 0.15 });
     io.observe($('.pay'));
   }
   $('#cart').onclick = cartClick;
@@ -541,6 +543,7 @@ function drawCart() {
 }
 
 function drawPay() {
+  if (!$('#totalDue')) return; // sale screen not shown
   const { items, total } = cartTotals(state.cart);
   const tendered = parseMoney(state.tendered);
   const ch = changeDue(total, tendered);
@@ -769,6 +772,173 @@ async function completeQarzSale({ customer, cash, balance, shift, total }) {
     await db.customers.update(customer.id, { updatedAt: ts, synced: 0 });
   });
   afterSale(sale);
+}
+
+// ====================================================================== qarz tab
+const owedHtml = (b) => (b < 0 ? `<span class="owed-by-shop">دکان بدهکار است ${m(-b)}</span>` : m(b));
+
+async function renderQarz(query = '') {
+  const customers = await db.customers.toArray();
+  const balances = balancesById(await db.ledger.toArray());
+  const owedTotal = [...balances.values()].reduce((a, r) => a + Math.max(0, r.balance), 0);
+  const owingN = [...balances.values()].filter((r) => r.balance > 0).length;
+  const list = findCustomers(customers, query, balances);
+  $('#main').innerHTML = `<div class="stack qarz-page">
+    <div class="total-due"><div class="k">مجموع قرض مردم</div><div class="v num">${m(owedTotal)}</div><div class="small">${toDariDigits(owingN)} نفر قرضدار</div></div>
+    <div class="card stack">
+      <div class="row"><input id="qFind" placeholder="جستجوی نام یا تلفن" autocomplete="off" value="${esc(query)}" class="grow"><button class="btn primary" id="qAdd">+ مشتری نو</button></div>
+      <div class="cust-list tall">${list.map((c) => { const r = balances.get(c.id);
+        return `<button class="btn cust-row" data-id="${esc(c.id)}"><span><b>${esc(c.name)}</b><small>${c.phone ? `<span class="ltr">${esc(c.phone)}</span> · ` : ''}${r?.lastAt ? esc(timeAgo(r.lastAt)) : 'بدون حساب'}</small></span><span class="num">${owedHtml(r?.balance || 0)}</span></button>`; }).join('')
+        || `<p class="empty">${query ? 'پیدا نشد' : 'هنوز کسی قرض نگرفته است. در صفحه فروش دکمه «قرض» را بزنید.'}</p>`}</div>
+    </div></div>`;
+  const f = $('#qFind');
+  f.oninput = () => { const v = f.value; renderQarz(v).then(() => { const i = $('#qFind'); i.focus(); i.setSelectionRange(v.length, v.length); }); };
+  $('.cust-list').onclick = (e) => { const id = e.target.closest('[data-id]')?.dataset.id; if (id) showCustomer(id); };
+  $('#qAdd').onclick = async () => {
+    const v = await formBox('مشتری نو', [{ name: 'name', label: 'نام', required: true }, { name: 'phone', label: 'تلفن (اختیاری)', inputmode: 'tel' }]);
+    if (!v?.name?.trim()) return;
+    const c = newCustomer(v.name, v.phone);
+    await db.customers.put(c);
+    refreshBadge();
+    showCustomer(c.id);
+  };
+}
+
+async function showCustomer(id) {
+  const c = await db.customers.get(id);
+  if (!c) return;
+  const entries = await db.ledger.where('customerId').equals(id).toArray();
+  entries.sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+  let run = 0;
+  const rows = entries.map((x) => ({ ...x, after: (run += x.amount) })).reverse();
+  const bal = run;
+  const admin = isAdmin();
+  modal(`<div class="cust-page">
+    <h2>${icon('wallet')} ${esc(c.name)}</h2>
+    ${c.phone ? `<p class="muted ltr">${esc(c.phone)}</p>` : ''}
+    <div class="change-box ${bal > 0 ? 'qarz-done owes' : ''}"><div>${bal < 0 ? 'دکان بدهکار است' : 'مانده قرض'}</div><div class="v num">${m(Math.abs(bal))}</div>
+      ${c.limit ? `<div class="small">حد قرض: ${m(c.limit)}</div>` : ''}</div>
+    <div class="actions"><button class="btn primary big grow" data-pay>${icon('cash')} دریافت پول</button><button class="btn big" data-send>${icon('share')} ارسال حساب</button></div>
+    <h3>تاریخچه</h3>
+    <div class="table-wrap"><table class="ledger"><thead><tr><th>تاریخ</th><th>چه</th><th>مبلغ</th><th>مانده</th></tr></thead><tbody>
+      ${rows.map((x) => `<tr ${x.receiptId ? `data-r="${esc(x.receiptId)}" class="link"` : ''}><td>${esc(dariDate(x.timestamp))}</td>
+        <td>${esc(LEDGER_LABEL[x.type] || x.type)}${x.note ? `<div class="small muted">${esc(x.note)}</div>` : ''}${x.receiptId ? `<div class="small muted ltr">${esc(x.receiptId)}</div>` : ''}</td>
+        <td class="${x.amount > 0 ? 'add' : 'paid'}">${x.amount > 0 ? '+' : '−'}${m(Math.abs(x.amount))}</td><td>${m(x.after)}</td></tr>`).join('') || '<tr><td colspan="4" class="empty">هنوز حسابی نیست</td></tr>'}
+    </tbody></table></div>
+    <div class="actions">
+      ${admin ? `<button class="btn" data-edit>ویرایش</button><button class="btn" data-adjust>اصلاح حساب</button>${bal === 0 ? '<button class="btn danger" data-del>حذف</button>' : ''}` : ''}
+      <button class="btn" data-close>بستن</button>
+    </div></div>`, {
+    onMount: (box, close) => {
+      const again = () => { close(); if (state.view === 'qarz') renderQarz($('#qFind')?.value || ''); showCustomer(id); };
+      box.querySelector('[data-close]').onclick = () => { close(); if (state.view === 'qarz') renderQarz($('#qFind')?.value || ''); };
+      box.querySelector('[data-pay]').onclick = async () => { if (await receivePayment(c, bal)) again(); };
+      box.querySelector('[data-send]').onclick = () => sendStatement(c, entries, bal);
+      box.querySelector('tbody').onclick = (e) => { const r = e.target.closest('[data-r]')?.dataset.r; if (r) showReceipt(r); };
+      box.querySelector('[data-edit]')?.addEventListener('click', async () => { if (await editCustomer(c)) again(); });
+      box.querySelector('[data-adjust]')?.addEventListener('click', async () => { if (await adjustCustomer(c)) again(); });
+      box.querySelector('[data-del]')?.addEventListener('click', async () => { if (await deleteCustomer(c, bal)) { close(); renderQarz(); } });
+    }
+  });
+}
+
+/** Money received against a customer's qarz: ledger payment + shift cash (movement type qarz), then offer a slip. */
+async function receivePayment(c, bal) {
+  const shift = await openShift();
+  if (!shift) { toast('اول شفت را باز کنید', 'err'); return false; }
+  const v = await new Promise((resolve) => modal(`<h2>دریافت پول — ${esc(c.name)}</h2>
+    <p class="muted">${bal < 0 ? 'دکان بدهکار است' : 'مانده قرض'}: <b>${m(Math.abs(bal))}</b></p>
+    <form class="stack" id="payF"><label class="field">مبلغ دریافتی (افغانی)<input name="amt" inputmode="decimal" required autocomplete="off" autofocus></label>
+      ${bal > 0 ? `<button type="button" class="btn" data-all>همه: ${m(bal)}</button>` : ''}
+      <div class="actions"><button class="btn primary grow" type="submit">✔ ثبت دریافت</button><button class="btn" type="button" data-no>لغو</button></div></form>`, {
+    dismiss: false,
+    onMount: (box, close) => {
+      const f = box.querySelector('#payF');
+      box.querySelector('[data-all]')?.addEventListener('click', () => { f.amt.value = formatNumber(bal); });
+      box.querySelector('[data-no]').onclick = () => { close(); resolve(null); };
+      f.onsubmit = (e) => { e.preventDefault(); close(); resolve(parseMoney(f.amt.value)); };
+    }
+  }));
+  if (!v || v <= 0) return false;
+  if (v > Math.max(bal, 0) && !(await confirmBox('بیشتر از قرض است — باز هم ثبت شود؟ (دکان به مشتری بدهکار می‌شود)'))) return false;
+  const ts = now();
+  const entry = ledgerEntry({ customer: c, type: 'payment', amount: -v, shiftId: shift.shiftId, by: state.user.name });
+  await db.transaction('rw', [db.ledger, db.movements, db.customers], async () => {
+    await db.ledger.add(entry);
+    await db.movements.add({ id: randomId(), shiftId: shift.shiftId, type: 'qarz', amount: v, note: c.name, userName: state.user.name,
+      approvedBy: '', timestamp: ts, updatedAt: ts, synced: 0 });
+    await db.customers.update(c.id, { updatedAt: ts, synced: 0 });
+  });
+  refreshBadge();
+  if (navigator.onLine) syncNow({ pull: false }).then(refreshBadge);
+  const after = bal - v;
+  const slip = paymentSlipDoc(entry, after, state.s);
+  await new Promise((resolve) => modal(`<h2>دریافت شد ✔</h2>
+    <div class="change-box"><div>${after < 0 ? 'دکان بدهکار است' : 'مانده قرض'} — ${esc(c.name)}</div><div class="v num">${m(Math.abs(after))}</div></div>
+    <div class="actions"><button class="btn primary grow" data-ok>تمام</button><button class="btn" data-print>🖨 چاپ رسید</button>
+      ${bluetoothSupported() ? '<button class="btn" data-bt>📶 بلوتوث</button>' : ''}</div>`, {
+    dismiss: false,
+    onMount: (box, close) => {
+      box.querySelector('[data-ok]').onclick = () => { close(); resolve(); };
+      box.querySelector('[data-print]').onclick = () => printHtml(slip, state.s.paperWidth);
+      box.querySelector('[data-bt]')?.addEventListener('click', () => btPrint(slip));
+    }
+  }));
+  return true;
+}
+
+async function sendStatement(c, entries, bal) {
+  const text = statementText({ storeName: state.s.storeName, customer: c, entries, balance: bal });
+  if (navigator.share) {
+    try { await navigator.share({ text }); return; } catch (err) { if (err.name === 'AbortError') return; }
+  }
+  try { await navigator.clipboard.writeText(text); toast('حساب کاپی شد — در واتساپ بچسبانید', 'ok'); }
+  catch { toast('ارسال در این مرورگر ممکن نیست', 'err'); }
+}
+
+async function editCustomer(c) {
+  const a = await requireAdmin('ویرایش مشتری — تأیید مدیر');
+  if (!a) return false;
+  const v = await formBox('ویرایش مشتری', [
+    { name: 'name', label: 'نام', value: c.name, required: true },
+    { name: 'phone', label: 'تلفن', value: c.phone, inputmode: 'tel' },
+    { name: 'limit', label: 'حد قرض (افغانی، ۰ = بدون حد)', value: c.limit ? formatNumber(c.limit) : '0', inputmode: 'decimal' }
+  ]);
+  if (!v?.name?.trim()) return false;
+  await db.customers.update(c.id, { name: v.name.trim(), phone: toLatin(v.phone || ''), limit: parseMoney(v.limit), updatedAt: now(), synced: 0 });
+  refreshBadge();
+  return true;
+}
+
+/** Manager correction: forgive, or enter an opening balance from the old notebook. Note required; never deletes history. */
+async function adjustCustomer(c) {
+  const a = await requireAdmin('اصلاح حساب — تأیید مدیر');
+  if (!a) return false;
+  const v = await formBox('اصلاح حساب', [
+    { name: 'dir', label: 'نوع', options: [['add', 'اضافه به قرض (مثلاً قرض قبلی از کتابچه)'], ['sub', 'کم از قرض (مثلاً بخشش)']] },
+    { name: 'amount', label: 'مبلغ (افغانی)', inputmode: 'decimal', required: true },
+    { name: 'note', label: 'دلیل (لازم)', required: true }
+  ]);
+  if (!v) return false;
+  const amt = parseMoney(v.amount);
+  if (!amt || !v.note?.trim()) { toast('مبلغ و دلیل لازم است', 'err'); return false; }
+  const ts = now();
+  await db.transaction('rw', [db.ledger, db.customers], async () => {
+    await db.ledger.add(ledgerEntry({ customer: c, type: 'adjust', amount: v.dir === 'sub' ? -amt : amt, by: a.name, note: v.note }));
+    await db.customers.update(c.id, { updatedAt: ts, synced: 0 });
+  });
+  refreshBadge();
+  return true;
+}
+
+async function deleteCustomer(c, bal) {
+  if (bal !== 0) return false;
+  const a = await requireAdmin('حذف مشتری — تأیید مدیر');
+  if (!a) return false;
+  if (!(await confirmBox(`«${c.name}» از فهرست حذف شود؟ تاریخچه حسابش نگه داشته می‌شود.`, { danger: true, okText: 'حذف' }))) return false;
+  await db.customers.update(c.id, { deleted: 1, updatedAt: now(), synced: 0 });
+  refreshBadge();
+  return true;
 }
 
 async function btPrint(doc) {

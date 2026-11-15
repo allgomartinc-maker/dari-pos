@@ -434,3 +434,13 @@ input:focus, select:focus, textarea:focus { border-color: var(--primary-2); outl
 .qarz-split .total { font-size: 1.15rem; margin-top: 4px; }
 .qarz-split .warn { color: var(--danger); font-size: .9rem; }
 .change-box.qarz-done.owes { background: var(--warn-bg); color: var(--warn); border-color: var(--warn); }
+
+.cust-list.tall { max-height: none; overflow: visible; }
+.cust-page h2 { display: flex; align-items: center; gap: 8px; margin-bottom: 0; }
+.cust-page h3 { margin: 16px 0 6px; }
+.cust-page .actions .btn .ico { width: 20px; height: 20px; }
+table.ledger td { font-size: .9rem; vertical-align: top; }
+table.ledger td.add { color: var(--warn); font-weight: 700; }
+table.ledger td.paid { color: var(--ok); font-weight: 700; }
+table.ledger tr.link { cursor: pointer; }
+.qarz-page #qFind { flex: 1; min-width: 0; }
