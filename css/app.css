@@ -396,3 +396,13 @@ input:focus, select:focus, textarea:focus { border-color: var(--primary-2); outl
 .weigh-total .v { font-size: 1.7rem; }
 .weigh .actions { margin-top: 4px; }
 .weigh .actions .grow { flex: 2; }
+
+/* ---------- reports: date range + send ---------- */
+.range-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.range-presets { display: flex; gap: 6px; flex-wrap: wrap; }
+.range-presets .btn.on { background: var(--primary-2); border-color: var(--primary-2); color: var(--primary-ink); }
+.range-label { font-weight: 600; }
+.report-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+@media (max-width: 520px) { .report-actions { grid-template-columns: 1fr; } }
+.stat-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.stat-grid .stat .v { font-size: 1.2rem; }

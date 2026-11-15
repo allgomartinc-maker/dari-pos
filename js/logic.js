@@ -328,3 +328,92 @@ export function installMode({ ua = '', standalone = false, canPrompt = false, to
   if (/iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && touch > 1)) return 'ios';
   return 'manual';
 }
+
+// ---------- reports over a range of days ----------
+const isoDay = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const localDay = (s) => { const [y, mo, d] = String(s).split('-').map(Number); return new Date(y, mo - 1, d); };
+export const MAX_REPORT_DAYS = 366;
+
+/** From–to (both days included, local time). Backwards picks are swapped; longer than a year keeps the last 366 days. */
+export function dayRange(from, to) {
+  let a = localDay(from), b = localDay(to || from);
+  if (a > b) [a, b] = [b, a];
+  const count = (x, y) => Math.round((Date.UTC(y.getFullYear(), y.getMonth(), y.getDate()) - Date.UTC(x.getFullYear(), x.getMonth(), x.getDate())) / 86400000) + 1;
+  if (count(a, b) > MAX_REPORT_DAYS) a = new Date(b.getFullYear(), b.getMonth(), b.getDate() - (MAX_REPORT_DAYS - 1));
+  const end = new Date(b.getFullYear(), b.getMonth(), b.getDate() + 1);
+  return { from: isoDay(a), to: isoDay(b), start: a, end, days: count(a, b) };
+}
+
+/** Totals for real (non-practice) sales: money, profit, voids, best sellers, and one row per day. */
+export function summarizeSales(sales) {
+  const good = sales.filter((s) => !s.voided), voided = sales.filter((s) => s.voided);
+  const net = good.reduce((a, s) => a + s.total, 0);
+  const cost = good.reduce((a, s) => a + s.items.reduce((b, l) => b + Math.round((l.cost || 0) * l.qty), 0), 0);
+  const top = new Map(), days = new Map();
+  for (const s of good) {
+    for (const l of s.items) {
+      const t = top.get(l.barcode) || { barcode: l.barcode, name: l.name, qty: 0, total: 0, unit: l.unit };
+      t.qty = addQty(t.qty, l.qty); t.total += lineTotal(l); top.set(l.barcode, t);
+    }
+    const k = isoDay(new Date(s.timestamp));
+    const d = days.get(k) || { day: k, total: 0, count: 0 };
+    d.total += s.total; d.count++; days.set(k, d);
+  }
+  return {
+    net, cost, profit: net - cost, count: good.length,
+    voids: { n: voided.length, total: voided.reduce((a, s) => a + s.total, 0) },
+    top: [...top.values()].sort((a, b) => b.total - a.total),
+    byDay: [...days.values()].sort((a, b) => a.day.localeCompare(b.day))
+  };
+}
+
+/** Plain Dari text of a report, for the body of an email or a message. */
+export function reportText({ storeName, range, sum }) {
+  const when = range.days === 1 ? dariDate(range.start, { time: false })
+    : `از ${dariDate(range.start, { time: false })} تا ${dariDate(localDay(range.to), { time: false })}`;
+  const lines = [
+    `گزارش فروش — ${storeName || ''}`.trim(), when, '',
+    `فروش خالص: ${formatMoney(sum.net)}`,
+    `مفاد ناخالص: ${formatMoney(sum.profit)}`,
+    `تعداد رسید: ${toDariDigits(sum.count)}`,
+    `باطل شده: ${toDariDigits(sum.voids.n)} (${formatMoney(sum.voids.total)})`
+  ];
+  if (sum.byDay.length > 1) {
+    lines.push('', 'روز به روز:');
+    for (const d of sum.byDay) lines.push(`${dariDate(localDay(d.day), { time: false })}: ${formatMoney(d.total)} · ${toDariDigits(d.count)} رسید`);
+  }
+  if (sum.top.length) {
+    lines.push('', 'پرفروش‌ترین اجناس:');
+    for (const t of sum.top.slice(0, 10)) lines.push(`${t.name}: ${formatQty(t.qty, t.unit)} · ${formatMoney(t.total)}`);
+  }
+  return lines.join('\n');
+}
+
+const localTime = (ts) => { const d = new Date(ts); return `${isoDay(d)} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+
+// Names typed by staff could start with = + - @ and run as a formula in Excel; a leading ' keeps them text.
+const safeText = (v) => (/^[=+\-@]/.test(String(v ?? '')) ? `'${v}` : v ?? '');
+
+/** One CSV (UTF-8 with BOM so Excel shows Dari): summary, per-day totals, then every sold line. */
+export function reportCsv({ storeName, range, sum, sales }) {
+  const afn = (p) => p / 100;
+  const rows = [
+    ['store', safeText(storeName)], ['from', range.from], ['to', range.to],
+    ['net_sales_afn', afn(sum.net)], ['gross_profit_afn', afn(sum.profit)], ['receipts', sum.count],
+    ['voided', sum.voids.n], ['voided_afn', afn(sum.voids.total)], [],
+    ['day', 'sales_afn', 'receipts'], ...sum.byDay.map((d) => [d.day, afn(d.total), d.count]), [],
+    ['receiptId', 'timestamp', 'cashier', 'barcode', 'item', 'qty', 'unit', 'price', 'lineTotal', 'receiptTotal', 'cashReceived', 'change', 'voided']
+  ];
+  for (const x of sales) for (const l of x.items) {
+    rows.push([x.receiptId, localTime(x.timestamp), safeText(x.cashierName), l.barcode, safeText(l.name), l.qty, l.unit || 'pc', afn(l.price), afn(lineTotal(l)),
+      afn(x.total), afn(x.cashReceived || 0), afn(x.changeGiven || 0), x.voided ? 1 : 0]);
+  }
+  return '﻿' + toCsv(rows);
+}
+
+/** First day of the Afghan solar (Hijri Shamsi) month that `date` falls in. */
+export function solarMonthStart(date = new Date()) {
+  const day = parseInt(new Intl.DateTimeFormat('en-u-ca-persian-nu-latn', { day: 'numeric' }).format(date), 10);
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate() - (day - 1));
+}
+export { isoDay };

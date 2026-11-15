@@ -2,7 +2,7 @@
 import {
   formatMoney, formatNumber, parseMoney, parseIntSafe, toDariDigits, cartTotals, changeDue, marginPct, QUICK_CASH,
   AFN_DENOMS, countDenoms, shiftExpected, varianceStatus, makeReceiptId, parseReceiptQr, eanValid, normalizeBarcode, looksLikeBarcode,
-  randomId, internalBarcode, toCsv, parseCsv, dariDate, timeAgo, backupDue, stampPrice, cartMixError, isPracticeSale, realSales, installMode, parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount, round3
+  randomId, internalBarcode, toCsv, parseCsv, dariDate, timeAgo, backupDue, stampPrice, cartMixError, isPracticeSale, realSales, installMode, dayRange, summarizeSales, reportText, reportCsv, solarMonthStart, isoDay, parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount, round3
 } from './logic.js';
 import {
   db, getSettings, setSetting, nextSeq, createUser, setUserPin, findUserByPin, pinInUse, openShift, pendingCount,
@@ -1053,55 +1053,90 @@ function editProduct(p, after, { isNew = !p.name } = {}) {
 }
 
 // ====================================================================== reports
-async function renderReports(dateStr) {
-  const day = dateStr || new Date().toLocaleDateString('en-CA');
-  const start = new Date(day + 'T00:00:00'), end = new Date(start.getTime() + 86400000);
-  const allSales = await db.sales.where('timestamp').between(start.toISOString(), end.toISOString()).reverse().toArray();
+async function renderReports(from, to) {
+  const today = isoDay(new Date());
+  const rr = state.reportRange || {};
+  const range = dayRange(from || rr.from || today, to || (from ? from : rr.to) || today);
+  state.reportRange = { from: range.from, to: range.to };
+  const allSales = await db.sales.where('timestamp').between(range.start.toISOString(), range.end.toISOString()).reverse().toArray();
   const sales = realSales(allSales), practiceN = allSales.length - sales.length;
-  const good = sales.filter((s) => !s.voided);
-  const net = good.reduce((a, s) => a + s.total, 0);
-  const cost = good.reduce((a, s) => a + s.items.reduce((b, l) => b + Math.round((l.cost || 0) * l.qty), 0), 0);
-  const voids = sales.filter((s) => s.voided);
-  const top = new Map();
-  for (const s of good) for (const l of s.items) { const t = top.get(l.barcode) || { name: l.name, qty: 0, total: 0, unit: l.unit }; t.qty = addQty(t.qty, l.qty); t.total += lineTotal(l); top.set(l.barcode, t); }
-  const topList = [...top.values()].sort((a, b) => b.total - a.total).slice(0, 10);
+  const sum = summarizeSales(sales);
+  const topList = sum.top.slice(0, 10);
   const shifts = await db.shifts.orderBy('openedAt').reverse().limit(15).toArray();
   const low = (await db.products.toArray()).filter((p) => (p.stock || 0) <= state.s.lowStock).slice(0, 30);
   const s = await getSettings();
+  const ago = (n) => { const d = new Date(); d.setDate(d.getDate() - n); return isoDay(d); };
+  const presets = [
+    ['امروز', today, today], ['دیروز', ago(1), ago(1)], ['۷ روز', ago(6), today],
+    ['این ماه', isoDay(solarMonthStart()), today], ['۳۰ روز', ago(29), today]
+  ];
+  const label = range.days === 1 ? dariDate(range.start, { time: false })
+    : `${dariDate(range.start, { time: false })} — ${dariDate(new Date(range.end.getTime() - 3600e3), { time: false })} · ${toDariDigits(range.days)} روز`;
+  const SHOW = 300;
   $('#main').innerHTML = `<div class="stack">
-    <div class="card row"><h2 style="margin:0">📊 گزارش</h2>
-      <input type="date" id="day" value="${day}" style="max-width:200px"><span class="muted">${esc(dariDate(start, { time: false }))}</span>
-      ${practiceN ? `<span class="muted small">🧪 ${toDariDigits(practiceN)} فروش تمرینی در این روز حساب نشده</span>` : ''}
-      <span class="spacer"></span><button class="btn" id="scanRcpt">📷 اسکن QR رسید</button><button class="btn" id="expSales">صادرات فروش CSV</button></div>
-    <div id="camBox" class="cam hidden"></div>
-    <div class="grid2">
-      <div class="stat"><div class="k">فروش خالص</div><div class="v">${m(net)}</div></div>
-      <div class="stat"><div class="k">تعداد رسید</div><div class="v">${toDariDigits(good.length)}</div></div>
-      <div class="stat"><div class="k">مفاد ناخالص</div><div class="v">${m(net - cost)}</div><div class="small muted">${toDariDigits(net ? Math.round(((net - cost) / net) * 100) : 0)}٪ از فروش</div></div>
-      <div class="stat"><div class="k">باطل شده</div><div class="v">${toDariDigits(voids.length)} · ${m(voids.reduce((a, x) => a + x.total, 0))}</div></div>
+    <div class="card stack report-head">
+      <div class="row"><h2 style="margin:0">${icon('chart')} گزارش</h2><span class="spacer"></span>
+        <button class="btn" id="scanRcpt">${icon('camera', 'ico-sm')} اسکن QR رسید</button></div>
+      <div class="range-row">
+        <label class="field">از<input type="date" id="rFrom" value="${range.from}" max="${today}"></label>
+        <label class="field">تا<input type="date" id="rTo" value="${range.to}" max="${today}"></label>
+      </div>
+      <div class="range-presets">${presets.map(([t, f, e]) => `<button class="btn small ${f === range.from && e === range.to ? 'on' : ''}" data-f="${f}" data-t="${e}">${t}</button>`).join('')}</div>
+      <div class="muted range-label">${esc(label)}${practiceN ? ` · 🧪 ${toDariDigits(practiceN)} فروش تمرینی حساب نشده` : ''}</div>
+      <div class="report-actions">
+        <button class="btn primary" id="sendRep">${icon('share', 'ico-sm')} ارسال (ایمیل، واتساپ…)</button>
+        <button class="btn" id="dlRep">${icon('download', 'ico-sm')} دانلود فایل Excel</button>
+      </div>
     </div>
+    <div id="camBox" class="cam hidden"></div>
+    <div class="grid2 stat-grid">
+      <div class="stat"><div class="k">فروش خالص</div><div class="v">${m(sum.net)}</div></div>
+      <div class="stat"><div class="k">تعداد رسید</div><div class="v">${toDariDigits(sum.count)}</div></div>
+      <div class="stat"><div class="k">مفاد ناخالص</div><div class="v">${m(sum.profit)}</div><div class="small muted">${toDariDigits(sum.net ? Math.round((sum.profit / sum.net) * 100) : 0)}٪ از فروش</div></div>
+      <div class="stat"><div class="k">باطل شده</div><div class="v">${toDariDigits(sum.voids.n)} · ${m(sum.voids.total)}</div></div>
+    </div>
+    ${range.days > 1 ? `<div class="card"><h3>روز به روز</h3><div class="table-wrap"><table><thead><tr><th>روز</th><th>فروش</th><th>رسید</th></tr></thead><tbody>
+      ${sum.byDay.map((d) => `<tr><td>${esc(dariDate(new Date(d.day + 'T12:00:00'), { time: false }))}</td><td>${m(d.total)}</td><td>${toDariDigits(d.count)}</td></tr>`).join('') || '<tr><td colspan="3" class="empty">فروشی نیست</td></tr>'}
+    </tbody></table></div></div>` : ''}
     <div class="grid2">
       <div class="card"><h3>پرفروش‌ترین اجناس</h3>${topList.length ? `<table><tbody>${topList.map((t) => `<tr><td>${esc(t.name)}</td><td>${formatQty(t.qty, t.unit)}</td><td>${m(t.total)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">—</p>'}</div>
       <div class="card"><h3>موجودی کم (≤ ${toDariDigits(s.lowStock)})</h3>${low.length ? `<table><tbody>${low.map((p) => `<tr><td>${esc(p.name)}</td><td>${toDariDigits(p.stock || 0)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">همه خوب است</p>'}</div>
     </div>
-    <div class="card"><h3>رسیدها</h3><div class="table-wrap"><table><thead><tr><th>رسید</th><th>زمان</th><th>صندوقدار</th><th>مجموع</th><th>دریافتی</th><th>باقی</th><th>همگام</th></tr></thead><tbody id="rcptRows">
-      ${sales.map((x) => `<tr class="${x.voided ? 'voided' : ''}" data-r="${esc(x.receiptId)}" style="cursor:pointer"><td><span class="ltr small">${esc(x.receiptId)}</span></td><td>${esc(dariDate(x.timestamp))}</td><td>${esc(x.cashierName)}</td>
-        <td>${m(x.total)}</td><td>${m(x.cashReceived)}</td><td>${m(x.changeGiven)}</td><td>${x.synced ? '✔' : '⏳'}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">فروشی در این روز نیست</td></tr>'}
+    <div class="card"><h3>رسیدها</h3>${sales.length > SHOW ? `<p class="muted small">${toDariDigits(SHOW)} رسید آخر نشان داده شده؛ همه در فایل Excel هستند.</p>` : ''}<div class="table-wrap"><table><thead><tr><th>رسید</th><th>زمان</th><th>صندوقدار</th><th>مجموع</th><th>دریافتی</th><th>باقی</th><th>همگام</th></tr></thead><tbody id="rcptRows">
+      ${sales.slice(0, SHOW).map((x) => `<tr class="${x.voided ? 'voided' : ''}" data-r="${esc(x.receiptId)}" style="cursor:pointer"><td><span class="ltr small">${esc(x.receiptId)}</span></td><td>${esc(dariDate(x.timestamp))}</td><td>${esc(x.cashierName)}</td>
+        <td>${m(x.total)}</td><td>${m(x.cashReceived)}</td><td>${m(x.changeGiven)}</td><td>${x.synced ? '✔' : '⏳'}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">فروشی در این روزها نیست</td></tr>'}
     </tbody></table></div></div>
     <div class="card"><h3>شفت‌ها</h3><div class="table-wrap"><table><thead><tr><th>شفت</th><th>صندوقدار</th><th>باز</th><th>بسته</th><th>متوقع</th><th>شمارش</th><th>تفاوت</th></tr></thead><tbody id="shiftRows">
       ${shifts.map((x) => `<tr data-sh="${esc(x.shiftId)}" style="cursor:pointer"><td><span class="ltr small">${esc(x.shiftId)}</span></td><td>${esc(x.cashierName)}</td><td>${esc(dariDate(x.openedAt))}</td>
         <td>${x.closedAt ? esc(dariDate(x.closedAt)) : '<b>باز</b>'}</td><td>${x.closedAt ? m(x.expectedCash) : '—'}</td><td>${x.closedAt ? m(x.countedCash) : '—'}</td>
         <td>${x.closedAt ? `<span class="variance ${esc(x.varianceStatus)}" style="font-size:1rem;padding:2px 8px">${m(x.variance)}</span>` : '—'}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">—</td></tr>'}
     </tbody></table></div></div></div>`;
-  $('#day').onchange = (e) => renderReports(e.target.value);
+  $('#rFrom').onchange = (e) => e.target.value && renderReports(e.target.value, $('#rTo').value || e.target.value);
+  $('#rTo').onchange = (e) => e.target.value && renderReports($('#rFrom').value || e.target.value, e.target.value);
+  $('.range-presets').onclick = (e) => { const b = e.target.closest('[data-f]'); if (b) renderReports(b.dataset.f, b.dataset.t); };
   $('#rcptRows').onclick = (e) => { const r = e.target.closest('[data-r]')?.dataset.r; if (r) showReceipt(r); };
   $('#shiftRows').onclick = async (e) => { const id = e.target.closest('[data-sh]')?.dataset.sh; if (!id) return; const sh = await db.shifts.get(id); if (sh.closedAt) showShiftResult(sh); };
   $('#scanRcpt').onclick = (e) => toggleCamera('camBox', reportsCode, e.currentTarget);
-  $('#expSales').onclick = () => {
-    const rows = [['receiptId', 'timestamp', 'cashier', 'barcode', 'item', 'qty', 'price', 'lineTotal', 'receiptTotal', 'cashReceived', 'change', 'voided']];
-    for (const x of sales) for (const l of x.items) rows.push([x.receiptId, x.timestamp, x.cashierName, l.barcode, l.name, l.qty, l.price / 100, lineTotal(l) / 100, x.total / 100, x.cashReceived / 100, x.changeGiven / 100, x.voided ? 1 : 0]);
-    download(`sales-${day}.csv`, '﻿' + toCsv(rows), 'text/csv;charset=utf-8');
-  };
+  const fileName = `report-${range.from}${range.days > 1 ? '_' + range.to : ''}.csv`;
+  const makeFile = () => reportCsv({ storeName: s.storeName, range, sum, sales });
+  $('#dlRep').onclick = () => { download(fileName, makeFile(), 'text/csv;charset=utf-8'); toast('فایل دانلود شد', 'ok'); };
+  $('#sendRep').onclick = () => sendReport({
+    file: new File([makeFile()], fileName, { type: 'text/csv' }),
+    subject: `گزارش فروش ${s.storeName || ''} — ${label}`.trim(),
+    text: reportText({ storeName: s.storeName, range, sum })
+  });
+}
+
+/** Phone share menu with the file attached (Gmail, WhatsApp, Telegram…); else open email with the summary and download the file. */
+async function sendReport({ file, subject, text }) {
+  if (navigator.canShare?.({ files: [file] })) {
+    try { await navigator.share({ files: [file], title: subject, text }); return; }
+    catch (err) { if (err.name === 'AbortError') return; console.warn(err); }
+  }
+  download(file.name, file, 'text/csv;charset=utf-8');
+  const body = text.length > 1800 ? text.slice(0, 1800) + '\n…' : text;
+  location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body + '\n\n(فایل کامل دانلود شد؛ آن را ضمیمه کنید)')}`;
+  toast('فایل دانلود شد — در ایمیل ضمیمه کنید', 'ok');
 }
 
 function reportsCode(code) {
