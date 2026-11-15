@@ -19,7 +19,11 @@ export function modal(html, { onMount, dismiss = true } = {}) {
   back.className = 'modal-back';
   back.innerHTML = `<div class="modal" role="dialog" aria-modal="true">${html}</div>`;
   $('#modalRoot').appendChild(back);
-  const close = () => back.remove();
+  document.body.classList.add('modal-open');
+  const close = () => {
+    back.remove();
+    if (!$('#modalRoot').children.length) document.body.classList.remove('modal-open');
+  };
   if (dismiss) {
     back.addEventListener('click', (e) => { if (e.target === back) close(); });
     back.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
@@ -138,3 +142,6 @@ export function pickFile(accept) {
     i.click();
   });
 }
+
+// iPhone Safari ignores user-scalable=no, so stop its pinch gesture directly.
+document.addEventListener('gesturestart', (e) => e.preventDefault(), { passive: false });

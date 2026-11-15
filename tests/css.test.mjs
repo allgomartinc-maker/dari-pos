@@ -15,3 +15,21 @@ test('form fields use at least 16px text so iPhone does not zoom on focus', () =
 test('weigh sheet presets sit on one row', () => {
   assert.match(css, /\.weigh-presets\s*\{[^}]*grid-template-columns:\s*repeat\(5,/);
 });
+
+// The till must stay still under a cashier's hands: no pinch zoom, no sideways drag, no bounce.
+const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+
+test('page cannot be pinch-zoomed', () => {
+  assert.match(html, /name="viewport"[^>]*maximum-scale=1[^>]*user-scalable=no/);
+  assert.match(css, /html\s*\{[^}]*touch-action:\s*pan-x pan-y/);
+});
+
+test('page cannot slide sideways or bounce', () => {
+  assert.match(css, /html,\s*body\s*\{[^}]*overflow-x:\s*clip/);
+  assert.match(css, /html,\s*body\s*\{[^}]*overscroll-behavior:\s*none/);
+});
+
+test('page behind an open sheet stays still', () => {
+  assert.match(css, /body\.modal-open\s*\{[^}]*overflow:\s*hidden/);
+  assert.match(css, /\.modal\s*\{[^}]*overscroll-behavior:\s*contain/);
+});
