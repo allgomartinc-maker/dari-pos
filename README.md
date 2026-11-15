@@ -106,3 +106,14 @@ tests/          node --test (logic + Apps Script against a fake Sheets API)
 ## Open-source credits
 
 Dexie.js (Apache-2.0) · html5-qrcode / ZXing (Apache-2.0) · qrcode-generator (MIT) · Vazirmatn font (SIL OFL 1.1). Licenses are in `vendor/`.
+
+## Moving to a new phone
+
+1. Old phone: **Settings › «انتقال به گوشی نو»**. The share menu opens with a `dari-pos-move-….txt` file. Send it only to yourself (WhatsApp, Telegram, Bluetooth). It holds staff PIN hashes and the sync key.
+2. New phone: open the app › **«انتقال از گوشی قبلی»** › pick that file.
+3. Answer «گوشی قبلی هنوز فروش می‌کند؟» (is the old phone still selling?):
+   - **No:** everything moves, with the same device code.
+   - **Yes:** the new phone becomes the next till (T1 → T2). It gets the same staff and products, but no old sales and stock starting at 0.
+4. Log in with the old name and PIN.
+
+The file is `.txt` because Android's share menu refuses `.json` files. Restore keeps kilo amounts to the gram.

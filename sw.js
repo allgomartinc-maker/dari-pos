@@ -1,5 +1,5 @@
 // Service worker: caches the whole app so it opens and runs with no internet.
-const VERSION = 'dari-pos-v16';
+const VERSION = 'dari-pos-v17';
 const ASSETS = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/app.js', 'js/lazy.js', 'js/icons.js', 'js/db.js', 'js/logic.js', 'js/print.js', 'js/scanner.js', 'js/sync.js', 'js/ui.js',

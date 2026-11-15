@@ -1,6 +1,6 @@
 // IndexedDB storage via Dexie (vendor/dexie.min.js, Apache-2.0). Everything lives on the device.
 // Booleans can't be indexed in IndexedDB, so "synced" is stored as 0 / 1.
-import { hashPin, randomId } from './logic.js';
+import { hashPin, randomId, cleanBackup } from './logic.js';
 
 export const db = new window.Dexie('DariPOS');
 
@@ -103,18 +103,7 @@ export async function exportBackup() {
 }
 
 export async function importBackup(data) {
-  if (!data || data.app !== 'DariPOS' || !data.tables) throw new Error('فایل پشتیبان معتبر نیست');
-  // Coerce numeric fields so a hand-edited backup can't smuggle markup into number cells.
-  const num = (v) => (Number.isFinite(Number(v)) ? Math.round(Number(v)) : 0);
-  for (const p of data.tables.products || []) { p.barcode = String(p.barcode); p.name = String(p.name ?? ''); p.price = num(p.price); p.cost = num(p.cost); p.stock = num(p.stock); }
-  for (const s of data.tables.sales || []) {
-    for (const k of ['total', 'cashReceived', 'changeGiven']) s[k] = num(s[k]);
-    s.items = (s.items || []).map((l) => ({ ...l, name: String(l.name ?? ''), qty: num(l.qty), price: num(l.price), cost: num(l.cost) }));
-  }
-  for (const s of data.tables.shifts || []) {
-    for (const k of ['startingFloat', 'countedCash', 'expectedCash', 'variance', 'netCash', 'payouts', 'drops', 'payins', 'grossSales', 'voidTotal', 'txCount']) if (k in s) s[k] = num(s[k]);
-    if (s.varianceStatus && !['balanced', 'short', 'over'].includes(s.varianceStatus)) s.varianceStatus = '';
-  }
+  cleanBackup(data);
   await db.transaction('rw', db.tables, async () => {
     for (const t of db.tables) {
       if (!Array.isArray(data.tables[t.name])) continue;

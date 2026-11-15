@@ -406,3 +406,12 @@ input:focus, select:focus, textarea:focus { border-color: var(--primary-2); outl
 @media (max-width: 520px) { .report-actions { grid-template-columns: 1fr; } }
 .stat-grid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
 .stat-grid .stat .v { font-size: 1.2rem; }
+
+/* ---------- first screen: new shop or move ---------- */
+.start-choice { text-align: center; max-width: 440px; }
+.start-choice h2 { margin: 0 0 4px; }
+.btn.choice { justify-content: flex-start; gap: 14px; text-align: start; padding: 14px 16px; min-height: 76px; width: 100%; }
+.btn.choice .ico { width: 30px; height: 30px; flex: none; }
+.btn.choice span { display: flex; flex-direction: column; gap: 2px; }
+.btn.choice b { font-size: 1.1rem; }
+.btn.choice small { font-weight: 500; opacity: .8; font-size: .85rem; line-height: 1.4; }

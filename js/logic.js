@@ -417,3 +417,48 @@ export function solarMonthStart(date = new Date()) {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate() - (day - 1));
 }
 export { isoDay };
+
+// ---------- moving a shop to a new phone ----------
+/** Checks a backup file and makes every number safe. Money → whole pul; quantities and stock keep grams (kilo items). */
+export function cleanBackup(data) {
+  if (!data || data.app !== 'DariPOS' || !data.tables) throw new Error('فایل پشتیبان معتبر نیست');
+  const finite = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+  const pul = (v) => Math.round(finite(v));
+  const qty = (v) => round3(finite(v));
+  const t = data.tables;
+  for (const p of t.products || []) { p.barcode = String(p.barcode); p.name = String(p.name ?? ''); p.price = pul(p.price); p.cost = pul(p.cost); p.stock = qty(p.stock); }
+  for (const s of t.sales || []) {
+    for (const k of ['total', 'cashReceived', 'changeGiven']) s[k] = pul(s[k]);
+    s.items = (s.items || []).map((l) => ({ ...l, name: String(l.name ?? ''), qty: qty(l.qty), price: pul(l.price), cost: pul(l.cost) }));
+  }
+  for (const s of t.shifts || []) {
+    for (const k of ['startingFloat', 'countedCash', 'expectedCash', 'variance', 'netCash', 'payouts', 'drops', 'payins', 'grossSales', 'voidTotal', 'txCount']) if (k in s) s[k] = pul(s[k]);
+    if (s.varianceStatus && !['balanced', 'short', 'over'].includes(s.varianceStatus)) s.varianceStatus = '';
+  }
+  for (const r of t.settings || []) if (r.key === 'deviceId') r.value = String(r.value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) || 'T1';
+  return data;
+}
+
+/** Device code for the next till: T1 → T2, T9 → T10, SHOP → SHOP2 (max 6 characters). */
+export function nextDeviceId(id) {
+  const m = String(id || 'T1').toUpperCase().replace(/[^A-Z0-9]/g, '').match(/^(.*?)(\d*)$/);
+  const n = String((parseInt(m[2] || '1', 10) || 1) + 1);
+  return (m[1] || 'T').slice(0, Math.max(1, 6 - n.length)) + n;
+}
+
+/** Old phone keeps selling: the new phone becomes a second till with the same staff, products and shop
+ *  settings, but its own code, no old sales or shifts, and empty stock (each till counts its own stock). */
+export function prepareSecondTill(data) {
+  const t = data.tables;
+  const set = Object.fromEntries((t.settings || []).map((r) => [r.key, r.value]));
+  const id = nextDeviceId(set.deviceId);
+  const tillNo = parseInt(id.match(/\d+$/)?.[0] || '2', 10);
+  Object.assign(set, {
+    deviceId: id, setupDone: true, receiptSeq: 0, shiftSeq: 0, lastBackupAt: null,
+    internalSeq: Math.max(Number(set.internalSeq) || 0, tillNo * 100000000)
+  });
+  t.settings = Object.entries(set).map(([key, value]) => ({ key, value }));
+  t.products = (t.products || []).map((p) => ({ ...p, stock: 0 }));
+  for (const k of ['sales', 'shifts', 'movements', 'receivings']) t[k] = [];
+  return data;
+}

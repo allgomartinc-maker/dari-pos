@@ -2,7 +2,7 @@
 import {
   formatMoney, formatNumber, parseMoney, parseIntSafe, toDariDigits, cartTotals, changeDue, marginPct, QUICK_CASH,
   AFN_DENOMS, countDenoms, shiftExpected, varianceStatus, makeReceiptId, parseReceiptQr, eanValid, normalizeBarcode, looksLikeBarcode,
-  randomId, internalBarcode, toCsv, parseCsv, dariDate, timeAgo, backupDue, stampPrice, cartMixError, isPracticeSale, realSales, installMode, dayRange, summarizeSales, reportText, reportCsv, solarMonthStart, isoDay, parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount, round3
+  randomId, internalBarcode, toCsv, parseCsv, dariDate, timeAgo, backupDue, stampPrice, cartMixError, isPracticeSale, realSales, installMode, cleanBackup, nextDeviceId, prepareSecondTill, dayRange, summarizeSales, reportText, reportCsv, solarMonthStart, isoDay, parseQty, formatQty, lineTotal, addQty, normalizeUnit, weightForAmount, round3
 } from './logic.js';
 import {
   db, getSettings, setSetting, nextSeq, createUser, setUserPin, findUserByPin, pinInUse, openShift, pendingCount,
@@ -161,10 +161,48 @@ async function refreshBadge() {
 }
 
 // ====================================================================== setup & lock
+const BACKUP_FILES = '.txt,.json,text/plain,application/json';
+
+/** First screen on a new phone: start a new shop, or bring one over from the old phone. */
 function renderSetup() {
   $('#topbar').classList.add('hidden');
-  $('#main').innerHTML = `<div class="center-screen"><form class="card setup stack" id="setupForm">
+  $('#main').innerHTML = `<div class="center-screen"><div class="card setup stack start-choice">
     <div class="install-box"></div>
+    <div class="lock-mark" aria-hidden="true">؋</div>
+    <h2>صندوق دری</h2>
+    <button class="btn primary big choice" id="chNew">${icon('cart')}<span><b>فروشگاه نو</b><small>اولین بار است که این صندوق را راه می‌اندازید</small></span></button>
+    <button class="btn big choice" id="chMove">${icon('download')}<span><b>انتقال از گوشی قبلی</b><small>فایل «انتقال به گوشی نو» را از واتساپ یا تلگرام انتخاب کنید</small></span></button>
+  </div></div>`;
+  refreshInstallBoxes();
+  $('#chNew').onclick = renderNewShop;
+  $('#chMove').onclick = moveIn;
+}
+
+async function moveIn() {
+  const f = await pickFile(BACKUP_FILES);
+  if (!f) return;
+  let data;
+  try { data = cleanBackup(JSON.parse(await f.text())); }
+  catch { return toast('این فایل انتقال صندوق نیست — فایل «dari-pos-move» را انتخاب کنید', 'err'); }
+  const old = (data.tables.settings || []).find((r) => r.key === 'deviceId')?.value || 'T1';
+  const keep = await new Promise((resolve) => modal(`<h2>گوشی قبلی هنوز فروش می‌کند؟</h2>
+    <div class="stack">
+      <button class="btn primary big choice" data-a="move">${icon('check')}<span><b>نه — همه چیز به این گوشی بیاید</b><small>همان کد ${esc(old)}، همه فروش‌ها، شفت‌ها و موجودی</small></span></button>
+      <button class="btn big choice" data-a="second">${icon('cart')}<span><b>بلی — این گوشی صندوق دوم شود</b><small>کد نو ${esc(nextDeviceId(old))}، همان کاربران و اجناس، موجودی از صفر</small></span></button>
+      <button class="btn" data-a="">لغو</button>
+    </div>`, { dismiss: false, onMount: (box, close) => { box.onclick = (e) => { const b = e.target.closest('[data-a]'); if (b) { close(); resolve(b.dataset.a); } }; } }));
+  if (!keep) return;
+  if (keep === 'second') prepareSecondTill(data);
+  try { await importBackup(data); }
+  catch (err) { return toast(err.message, 'err'); }
+  state.s = await getSettings();
+  if (!state.s.setupDone) { await setSetting('setupDone', true); state.s = await getSettings(); }
+  toast(`انتقال شد ✔ — کد این صندوق: ${state.s.deviceId}. با نام و رمز قبلی وارد شوید.`, 'ok');
+  renderLock();
+}
+
+function renderNewShop() {
+  $('#main').innerHTML = `<div class="center-screen"><form class="card setup stack" id="setupForm">
     <h2>راه‌اندازی صندوق</h2>
     <p class="muted">این تنظیمات فقط یک بار انجام می‌شود. همه اطلاعات در همین دستگاه ذخیره می‌شود و بدون انترنت کار می‌کند.</p>
     <label class="field">نام فروشگاه<input name="storeName" required value="فروشگاه من"></label>
@@ -176,8 +214,9 @@ function renderSetup() {
     </div>
     <label class="check"><input type="checkbox" name="sample"> 🧪 افزودن اجناس نمونه برای تمرین (قبل از فروش واقعی حذف شود)</label>
     <button class="btn primary big" type="submit">شروع</button>
+    <button class="btn" type="button" id="backChoice">← برگشت</button>
   </form></div>`;
-  refreshInstallBoxes();
+  $('#backChoice').onclick = renderSetup;
   $('#setupForm').onsubmit = async (e) => {
     e.preventDefault();
     const f = Object.fromEntries(new FormData(e.target));
@@ -1127,13 +1166,20 @@ async function renderReports(from, to) {
   });
 }
 
-/** Phone share menu with the file attached (Gmail, WhatsApp, Telegram…); else open email with the summary and download the file. */
-async function sendReport({ file, subject, text }) {
+/** Opens the phone's share menu with the file attached (WhatsApp, Gmail, Telegram, Bluetooth…).
+ *  Returns 'shared', 'cancelled', or 'downloaded' when the browser can't share files. */
+async function shareFile(file, { title = '', text = '' } = {}) {
   if (navigator.canShare?.({ files: [file] })) {
-    try { await navigator.share({ files: [file], title: subject, text }); return; }
-    catch (err) { if (err.name === 'AbortError') return; console.warn(err); }
+    try { await navigator.share({ files: [file], title, text }); return 'shared'; }
+    catch (err) { if (err.name === 'AbortError') return 'cancelled'; console.warn(err); }
   }
-  download(file.name, file, 'text/csv;charset=utf-8');
+  download(file.name, file);
+  return 'downloaded';
+}
+
+/** Report: share menu with the file; where that isn't possible, download it and open an email with the summary. */
+async function sendReport({ file, subject, text }) {
+  if (await shareFile(file, { title: subject, text }) !== 'downloaded') return;
   const body = text.length > 1800 ? text.slice(0, 1800) + '\n…' : text;
   location.href = `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body + '\n\n(فایل کامل دانلود شد؛ آن را ضمیمه کنید)')}`;
   toast('فایل دانلود شد — در ایمیل ضمیمه کنید', 'ok');
@@ -1190,6 +1236,9 @@ async function renderSettings() {
       <p class="muted small">چاپگر USB/سیستمی: دکمه «چاپ» از پنجره چاپ مرورگر استفاده می‌کند. چاپگر بلوتوث: فقط در Chrome (اندروید/کمپیوتر).</p>
       <div class="row"><button class="btn" id="testPrint">چاپ آزمایشی</button>
       ${bluetoothSupported() ? `<button class="btn" id="btConnect">وصل کردن چاپگر بلوتوث ${bluetoothName() ? '(' + esc(bluetoothName()) + ')' : ''}</button><button class="btn" id="btTest">آزمایش بلوتوث</button>` : '<span class="muted small">این مرورگر بلوتوث را پشتیبانی نمی‌کند</span>'}</div></div>
+    <div class="card stack move-card"><h2>📲 انتقال به گوشی نو</h2>
+      <p class="muted small">یک فایل ساخته می‌شود که همه چیز این صندوق را دارد: کاربران و رمزها، اجناس، موجودی، فروش‌ها و تنظیمات. آن را فقط برای خودتان بفرستید (واتساپ، تلگرام، بلوتوث)، بعد در گوشی نو «انتقال از گوشی قبلی» را بزنید.</p>
+      <button class="btn primary big" id="moveOut">${icon('share')} انتقال به گوشی نو</button></div>
     <div class="card stack"><h2>💾 پشتیبان</h2>
       <p><b>آخرین پشتیبان: ${esc(timeAgo(s.lastBackupAt))}</b>${s.lastBackupAt ? ` <span class="muted small">(${esc(dariDate(s.lastBackupAt))})</span>` : ''}</p>
       <p class="muted small">ذخیره دائمی دستگاه: ${persisted ? '✔ فعال' : '✖ فعال نیست — اپ را نصب کنید (Add to Home Screen)'} · هر روز پس از بستن شفت پشتیبان بگیرید و فایل را در فلش، واتساپ یا ایمیل خود نگه دارید.</p>
@@ -1249,8 +1298,16 @@ async function renderSettings() {
   $('#btConnect')?.addEventListener('click', async () => { try { toast('وصل شد: ' + (await connectBluetooth()), 'ok'); renderSettings(); } catch (err) { toast(err.message, 'err'); } });
   $('#btTest')?.addEventListener('click', () => btPrint(receiptDoc(sample, state.s)));
   $('#backup').onclick = async () => { await doBackup(); renderSettings(); };
+  $('#moveOut').onclick = async () => {
+    const data = await exportBackup();
+    const file = new File([JSON.stringify(data)], `dari-pos-move-${state.s.deviceId}-${new Date().toISOString().slice(0, 10)}.txt`, { type: 'text/plain' });
+    const r = await shareFile(file, { title: 'انتقال صندوق دری' });
+    if (r === 'cancelled') return;
+    await setSetting('lastBackupAt', now());
+    toast(r === 'shared' ? 'فایل فرستاده شد — حالا در گوشی نو باز کنید' : 'فایل دانلود شد — آن را به گوشی نو بفرستید', 'ok');
+  };
   $('#restore').onclick = async () => {
-    const f = await pickFile('.json,application/json');
+    const f = await pickFile(BACKUP_FILES);
     if (!f) return;
     if (!(await confirmBox('همه اطلاعات فعلی این دستگاه با فایل پشتیبان جایگزین شود؟', { danger: true, okText: 'جایگزین شود' }))) return;
     try { await importBackup(JSON.parse(await f.text())); toast('بازیابی شد', 'ok'); state.s = await getSettings(); renderLock(); }
