@@ -1239,14 +1239,14 @@ function askWeight(p, current) {
   return new Promise((resolve) => {
     let done = false;
     const finish = (v, close) => { if (done) return; done = true; close(); resolve(v); };
-    modal(`<h2>⚖ ${esc(p.name)}</h2><p class="muted">قیمت: ${priceLabel(p)}</p>
+    modal(`<div class="weigh"><h2>${icon('scale')} ${esc(p.name)}</h2><p class="muted price-line">قیمت: ${priceLabel(p)}</p>
       <form class="stack" id="wf">
-        <label class="field">وزن (کیلو) — از ترازو بخوانید<input name="w" inputmode="decimal" autocomplete="off" autofocus value="${current ? qtyInput(current) : ''}" placeholder="مثلاً ۱٫۲۵"></label>
-        <div class="qty-add">${[0.25, 0.5, 1, 2, 5].map((n) => `<button type="button" class="btn" data-kg="${n}">${formatQty(n, 'kg')}</button>`).join('')}</div>
-        <label class="field">یا مبلغ (افغانی) — مشتری چند پول جنس می‌خواهد<input name="amt" inputmode="decimal" autocomplete="off" placeholder="مثلاً ۵۰"></label>
-        <div class="change-box"><div>قیمت این وزن</div><div class="v num" id="wTotal">${m(0)}</div></div>
+        <label class="field">وزن از ترازو<span class="weigh-input"><input name="w" inputmode="decimal" autocomplete="off" autofocus value="${current ? qtyInput(current) : ''}" placeholder="۰" aria-label="وزن به کیلو"><span class="unit">کیلو</span></span></label>
+        <div class="qty-add weigh-presets">${[0.25, 0.5, 1, 2, 5].map((n) => `<button type="button" class="btn" data-kg="${n}">${qtyInput(n)}</button>`).join('')}</div>
+        <label class="field">یا مبلغی که مشتری می‌خواهد (افغانی)<input name="amt" inputmode="decimal" autocomplete="off" placeholder="مثلاً ۵۰"></label>
+        <div class="change-box weigh-total"><div>قیمت این وزن</div><div class="v num" id="wTotal">${m(0)}</div></div>
         <div class="actions"><button class="btn primary grow" type="submit">افزودن به سبد</button><button class="btn" type="button" data-no>لغو</button></div>
-      </form>`, {
+      </form></div>`, {
       dismiss: false,
       onMount: (box, close) => {
         const f = box.querySelector('#wf');

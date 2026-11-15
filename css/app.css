@@ -107,7 +107,9 @@ main { padding: 16px; max-width: 1400px; margin: 0 auto; }
 label.field { display: flex; flex-direction: column; gap: 4px; font-weight: 600; font-size: .92rem; }
 input, select, textarea {
   border: 1px solid var(--border); background: var(--surface); border-radius: 10px; padding: 10px 12px; min-height: 44px; width: 100%;
+  font-size: 16px; /* under 16px, iPhone zooms the page on focus and cuts sheets off */
 }
+label.field > input, label.field > select, label.field > textarea { font-weight: 400; }
 input:focus, select:focus, textarea:focus, button:focus-visible { outline: 3px solid color-mix(in srgb, var(--primary-2) 45%, transparent); outline-offset: 1px; }
 input[type=checkbox] { width: 22px; height: 22px; min-height: 0; }
 .check { display: flex; align-items: center; gap: 8px; font-weight: 600; }
@@ -378,3 +380,16 @@ input:focus, select:focus, textarea:focus { border-color: var(--primary-2); outl
 .lock-mark { width: 52px; height: 52px; margin: 2px auto 8px; border-radius: 16px; display: grid; place-items: center; font-size: 1.6rem; font-weight: 900;
   color: var(--accent); background: linear-gradient(135deg, #2448ad, #14296a); box-shadow: 0 6px 16px rgba(20,41,106,.25); }
 .install-card { background: color-mix(in srgb, var(--primary-2) 6%, var(--surface)); border-color: color-mix(in srgb, var(--primary-2) 45%, transparent); }
+
+/* ---------- weigh sheet ---------- */
+.weigh h2 { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+.weigh .price-line { margin: 0 0 14px; }
+.weigh-input { position: relative; }
+.weigh-input input { font-size: 1.8rem; font-weight: 800; text-align: center; min-height: 64px; padding-inline: 64px; font-variant-numeric: tabular-nums; }
+.weigh-input .unit { position: absolute; inset-inline-end: 16px; top: 50%; transform: translateY(-50%); color: var(--muted); font-weight: 700; pointer-events: none; }
+.weigh-presets { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; }
+.weigh-presets .btn { padding: 8px 2px; min-height: 48px; font-size: .95rem; white-space: nowrap; }
+.weigh-total { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 12px 16px; }
+.weigh-total .v { font-size: 1.7rem; }
+.weigh .actions { margin-top: 4px; }
+.weigh .actions .grow { flex: 2; }
