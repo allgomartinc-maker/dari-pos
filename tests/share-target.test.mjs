@@ -23,3 +23,9 @@ test('service worker keeps the shared file and opens the app; app updates never 
   assert.match(sw, /SHARE_CACHE/);
   assert.match(sw, /k !== VERSION && k !== SHARE_CACHE/);
 });
+
+test('offline cache includes every app module (qarz.js too), so the app opens with no internet', async () => {
+  const { readdirSync } = await import('node:fs');
+  const mods = readdirSync(new URL('../js/', import.meta.url)).filter((f) => f.endsWith('.js')).map((f) => 'js/' + f);
+  for (const f of mods) assert.ok(sw.includes(`'${f}'`), f + ' missing from sw.js ASSETS');
+});

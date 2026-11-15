@@ -117,3 +117,17 @@ Dexie.js (Apache-2.0) · html5-qrcode / ZXing (Apache-2.0) · qrcode-generator (
 4. Log in with the old name and PIN.
 
 The file is `.txt` because Android's share menu refuses `.json` files. Restore keeps kilo amounts to the gram.
+
+## Qarz (customer credit)
+
+- **Sale screen › «قرض»:** pick or add the customer and type any cash they hand over now. Cash covers this purchase first; anything extra pays down their old qarz. Example: owes 2,000, buys 500, gives 1,000 → owes 1,500.
+- **«قرض» tab:**
+  - everyone, highest debt first
+  - each person's history with the balance after each line
+  - «دریافت پول» (receive money; it needs an open shift and prints a slip)
+  - «ارسال حساب» (send their account by WhatsApp)
+  - manager only: edit or limit, «اصلاح حساب» (with a note), delete (only at balance 0)
+- **Shift cash:** qarz money collected counts in the shift that receives it, and the Z report shows «دریافت قرض».
+- **Reports:** qarz given, qarz collected and total owed, for the chosen dates.
+- **Google Sheet:** `Qarz_Customers` and `Qarz_Ledger` tabs. **The owner must re-paste `apps-script/Code.gs`, run `setup`, and deploy a new version.** Until then qarz rows wait on the phone, nothing is lost, and Settings shows a warning.
+- **Limits:** qarz lives on one phone. A second till made with the phone move starts with no customers.
