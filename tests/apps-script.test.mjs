@@ -27,6 +27,7 @@ function fakeSheet(name) {
 function load() {
   const sheets = {};
   const ss = {
+    getId: () => 'THIS_SHEET',
     getSheetByName: (n) => sheets[n] || null,
     insertSheet: (n) => (sheets[n] = fakeSheet(n)),
     getSheets: () => Object.values(sheets),
@@ -235,9 +236,11 @@ test('pairing: payload format matches the app, menu exists, undeployed script ex
   assert.equal(ctx.pairingPayload('https://script.google.com/macros/s/A/exec', 'tok'), 'DPOS|S|https://script.google.com/macros/s/A/exec|tok');
   const alerts = [], items = [];
   const menu = { addItem(t, f) { items.push([t, f]); return this; }, addToUi() { items.done = true; } };
-  ctx.SpreadsheetApp.getUi = () => ({ createMenu: () => menu, alert: (m) => alerts.push(String(m)), showModalDialog() { alerts.push('dialog'); } });
+  ctx.SpreadsheetApp.getUi = () => ({ createMenu: () => menu, alert: (m) => alerts.push(String(m)), showModalDialog() { alerts.push('dialog'); },
+    ButtonSet: { OK: 'OK', OK_CANCEL: 'OK_CANCEL' }, Button: { OK: 'OK', CANCEL: 'CANCEL' },
+    prompt: (t, m) => { alerts.push(t + ' ' + m); return { getSelectedButton: () => 'CANCEL', getResponseText: () => '' }; } });
   ctx.onOpen();
-  assert.deepEqual(items.map((x) => x[1]), ['setup', 'showPairing']); assert.ok(items.done);
+  assert.deepEqual(items.map((x) => x[1]), ['setup', 'showPairing', 'newKey']); assert.ok(items.done);
   ctx.ScriptApp = { getService: () => ({ getUrl: () => null }) };
   ctx.showPairing();
   assert.match(alerts[0], /Deploy/);
@@ -249,4 +252,56 @@ test('pairing: dialog HTML carries the payload and escapes markup', () => {
   const h = ctx.pairingHtml('DPOS|S|u|t<x>', 'u<x>', 't<x>');
   assert.ok(!h.includes('t<x>')); assert.match(h, /t&lt;x&gt;/);
   assert.match(h, /cdnjs\.cloudflare\.com\/ajax\/libs\/qrcode-generator\/1\.4\.4\/qrcode\.min\.js/);
+});
+
+function pairUi(ctx, promptText) {
+  const log = { alerts: [], dialogs: [], prompts: 0 };
+  ctx.SpreadsheetApp.getUi = () => ({
+    ButtonSet: { OK: 'OK', OK_CANCEL: 'OK_CANCEL' }, Button: { OK: 'OK', CANCEL: 'CANCEL' },
+    alert: (...a) => log.alerts.push(a.join(' ')),
+    prompt: () => { log.prompts++; return { getSelectedButton: () => 'OK', getResponseText: () => promptText }; },
+    showModalDialog: (h) => log.dialogs.push(h)
+  });
+  ctx.HtmlService = { createHtmlOutput: (h) => ({ html: h, setWidth() { return this; }, setHeight() { return this; } }) };
+  return log;
+}
+const EXEC = 'https://script.google.com/macros/s/AKfyEXEC123/exec';
+
+test('pairing: editor gives a /dev address → asks once for the /exec address, remembers it, QR uses it', () => {
+  const { ctx, props } = load();
+  ctx.ScriptApp = { getService: () => ({ getUrl: () => 'https://script.google.com/macros/s/SCRIPTID/dev' }) };
+  const log = pairUi(ctx, '  ' + EXEC + ' ');
+  ctx.showPairing();
+  assert.equal(log.prompts, 1);
+  assert.equal(props.WEBAPP_URL, EXEC);
+  assert.match(log.dialogs[0].html, /AKfyEXEC123\/exec/);
+  assert.ok(!/\/dev/.test(log.dialogs[0].html));
+  ctx.showPairing();
+  assert.equal(log.prompts, 1, 'not asked again');
+});
+
+test('pairing: a pasted address that is not a web app /exec link is refused', () => {
+  const { ctx, props } = load();
+  ctx.ScriptApp = { getService: () => ({ getUrl: () => null }) };
+  const log = pairUi(ctx, 'https://evil.example/exec');
+  ctx.showPairing();
+  assert.equal(props.WEBAPP_URL, undefined);
+  assert.equal(log.dialogs.length, 0);
+  assert.match(log.alerts.join(' '), /Deploy/);
+});
+
+test('copied Sheet: a key that belongs to another Sheet (the template) is replaced on setup', () => {
+  const { ctx, props } = load();
+  const first = props.SYNC_TOKEN;
+  props.SHEET_ID = 'TEMPLATE_ID';           // as if copied from the template
+  ctx.setup();
+  assert.notEqual(props.SYNC_TOKEN, first);
+  const second = props.SYNC_TOKEN;
+  ctx.setup();                               // same Sheet again: key kept
+  assert.equal(props.SYNC_TOKEN, second);
+});
+
+test('pairing dialog: the QR library is pinned with integrity', () => {
+  const { ctx } = load();
+  assert.match(ctx.pairingHtml('DPOS|S|u|t', 'u', 't'), /integrity="sha512-ZDSPMa\/JM1D\+7kdg2x3BsruQ6T\/JpJo3jWDWkCZsP\+5yVyp1KfESqLI\+7RqB5k24F7p2cV7i2YHh\/890y6P6Sw==" crossorigin="anonymous"/);
 });

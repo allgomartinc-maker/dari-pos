@@ -298,6 +298,8 @@ function bindDemoBanner(after) {
 let failCount = 0, lockedUntil = 0;
 function renderLock() {
   stopCamera();
+  // Nothing a manager left open (pairing camera, a customer page) stays above the lock screen.
+  $('#modalRoot').innerHTML = ''; document.body.classList.remove('modal-open');
   state.user = null;
   $('#topbar').classList.add('hidden');
   $('#main').innerHTML = `<div class="center-screen"><div class="card lock">
@@ -959,6 +961,9 @@ function pairByQr() {
         if (!p) return toast('این QR اتصال نیست — QR را از منوی «صندوق دری» باز کنید', 'err');
         busy = true;
         await stop();
+        const old = { url: state.s.webhookUrl || '', token: state.s.syncToken || '' };
+        // Already connected to a different Sheet: all sales would go to the new one — make that a deliberate choice.
+        if (old.url && old.url !== p.url && !(await confirmBox(`این گوشی به یک گوگل شیت دیگر وصل است. از این به بعد فروش‌ها به شیت نو فرستاده شود؟\n\nقبلی: …${old.url.slice(-18)}\nنو: …${p.url.slice(-18)}`, { danger: true, okText: 'بلی، شیت نو' }))) return;
         await setSetting('webhookUrl', p.url);
         await setSetting('syncToken', p.token);
         state.s = await getSettings();
@@ -966,7 +971,11 @@ function pairByQr() {
         const r = await syncNow();
         if (r.ok) toast(`✔ گوگل شیت وصل است (${toDariDigits(r.sent)} ریکارد فرستاده شد)`, 'ok');
         else if (r.reason === 'offline') toast('ذخیره شد. انترنت وصل نیست — بعداً خودش همگام می‌کند');
-        else toast('ذخیره شد، اما همگام نشد: ' + (r.error || ''), 'err');
+        else {
+          // The Sheet refused (wrong key, deleted deployment): keep the connection that worked before.
+          await setSetting('webhookUrl', old.url); await setSetting('syncToken', old.token); state.s = await getSettings();
+          toast('اتصال ناموفق: ' + (r.error || '') + (old.url ? ' — اتصال قبلی نگه داشته شد' : ''), 'err');
+        }
         refreshBadge();
         if (state.view === 'settings') renderSettings();
       };

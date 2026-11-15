@@ -140,6 +140,11 @@ The file is `.txt` because Android's share menu refuses `.json` files. Restore k
 4. Menu **«صندوق دری» › «QR اتصال»** shows a QR.
 5. On the phone: **Settings › «اتصال با QR»** → scan it. The app saves the address and key and syncs once.
 
-The QR is drawn inside the Sheet's own dialog (qrcode-generator, MIT, from cdnjs), so the key never goes to a QR website. The QR is the shop's key: don't show it to anyone else.
+How the pairing stays safe and keeps working:
+- The QR is drawn inside the Sheet's own dialog (qrcode-generator, MIT, from cdnjs, pinned with SRI), so the key never goes to a QR website.
+- The QR is the shop's key: don't show it to anyone else. If it was seen, use the menu «کلید نو» and scan again on every phone.
+- If Google gives the editors-only `/dev` link, the dialog asks once for the deployment's `/exec` address and remembers it.
+- A copied Sheet always makes its own key, never the template's.
+- On the phone, switching to a different Sheet asks first, and a failed connection keeps the previous one.
 
 Template link: _to be added once the template Sheet exists._

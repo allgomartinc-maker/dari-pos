@@ -94,10 +94,11 @@ export function upcVariants(code) {
 }
 
 let gate = makeScanGate();
-async function emit(text, onCode, isKnown) {
+async function emit(text, onCode, isKnown, box) {
   const code = normalizeBarcode(text);
-  // Any dialog open (not-found, weight, add product) pauses the camera.
-  if (document.querySelector('.modal-back')) return;
+  // A dialog on top (not-found, weight, add product) pauses the camera — unless the camera itself is in that dialog (QR pairing).
+  const top = [...document.querySelectorAll('.modal-back')].pop();
+  if (top && !(box && top.contains(box))) return;
   let known = false;
   try { known = isKnown ? !!(await isKnown(code)) : false; } catch { /* treat as unknown */ }
   if (gate(code, Date.now(), known) !== 'accept') return;
@@ -303,11 +304,16 @@ async function setupControls(box, track, signal) {
 }
 
 // opts.isKnown(code) → true when the code is a product (or receipt) this device already has.
+// Each start/stop bumps this; a start that was cancelled while waiting for camera permission turns its stream off.
+let generation = 0;
+
 export async function startCamera(elementId, onCode, opts = {}) {
   await stopCamera();
+  const mine = ++generation;
   gate = makeScanGate();
   const box = document.getElementById(elementId);
   const [decode, stream] = await Promise.all([makeDecoder(), navigator.mediaDevices.getUserMedia({ video: VIDEO, audio: false })]);
+  if (mine !== generation || !box?.isConnected) { stream.getTracks().forEach((t) => t.stop()); return; }
   const track = stream.getVideoTracks()[0];
   const video = document.createElement('video');
   video.setAttribute('playsinline', '');
@@ -324,7 +330,7 @@ export async function startCamera(elementId, onCode, opts = {}) {
     if (c.stopped) return;
     const t0 = performance.now();
     if (video.readyState >= 2 && video.videoWidth) {
-      try { const text = await decode(video); if (text && !c.stopped) await emit(text, onCode, opts.isKnown); } catch { /* frame not ready */ }
+      try { const text = await decode(video); if (text && !c.stopped) await emit(text, onCode, opts.isKnown, box); } catch { /* frame not ready */ }
     }
     if (!c.stopped) c.timer = setTimeout(tick, Math.max(10, Math.min(150, (performance.now() - t0) / 2)));
   };
@@ -332,6 +338,7 @@ export async function startCamera(elementId, onCode, opts = {}) {
 }
 
 export async function stopCamera() {
+  generation++;
   if (!cam) return;
   const c = cam; cam = null;
   c.stopped = true;

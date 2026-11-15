@@ -58,7 +58,10 @@ function setup() {
   if (users.getLastRow() < 2) users.appendRow(['نمونه صندوقدار', 'cashier', '1212', false]);
   var props = PropertiesService.getScriptProperties();
   var token = props.getProperty('SYNC_TOKEN');
-  if (!token) { token = Utilities.getUuid().replace(/-/g, ''); props.setProperty('SYNC_TOKEN', token); }
+  // A copied Sheet (from the template) may carry the template's key: every shop must have its own.
+  var owner = props.getProperty('SHEET_ID');
+  if (!token || (owner && owner !== ss.getId())) { token = Utilities.getUuid().replace(/-/g, ''); props.setProperty('SYNC_TOKEN', token); props.deleteProperty && props.deleteProperty('WEBAPP_URL'); }
+  props.setProperty('SHEET_ID', ss.getId());
   var info = ss.getSheetByName('Setup') || ss.insertSheet('Setup');
   info.getRange('A1:B2').setValues([['SYNC_TOKEN (copy into app settings)', token], ['Keep this tab private', '']]);
   var s1 = ss.getSheetByName('Sheet1'); if (s1 && ss.getSheets().length > 1 && s1.getLastRow() === 0) ss.deleteSheet(s1);
@@ -281,8 +284,11 @@ function onOpen() {
   SpreadsheetApp.getUi().createMenu('صندوق دری')
     .addItem('راه‌اندازی', 'setup')
     .addItem('QR اتصال', 'showPairing')
+    .addItem('کلید نو (اگر QR دیده شده)', 'newKey')
     .addToUi();
 }
+
+var EXEC_RE = /^https:\/\/script\.google\.com\/(a\/macros\/[\w.-]+|macros)\/s\/[\w-]+\/exec$/;
 
 /** Same format the app reads (parsePairing in js/logic.js). */
 function pairingPayload(url, token) { return 'DPOS|S|' + url + '|' + token; }
@@ -293,11 +299,17 @@ function showPairing() {
   var props = PropertiesService.getScriptProperties();
   var token = props.getProperty('SYNC_TOKEN');
   if (!token) { setup(); token = props.getProperty('SYNC_TOKEN'); }
+  // From the editor/menu getUrl() often gives the editors-only /dev link; the phone needs the deployment's /exec link.
   var url = ScriptApp.getService().getUrl();
-  if (!url) {
-    ui.alert('اول Deploy کنید',
-      'Extensions › Apps Script › Deploy › New deployment › ⚙ Web app\nExecute as: Me · Who has access: Anyone › Deploy\nبعد دوباره «QR اتصال» را بزنید.', ui.ButtonSet ? ui.ButtonSet.OK : undefined);
-    return;
+  if (!EXEC_RE.test(String(url || ''))) url = props.getProperty('WEBAPP_URL');
+  if (!EXEC_RE.test(String(url || ''))) {
+    var r = ui.prompt('آدرس Web App',
+      'اگر هنوز Deploy نکرده‌اید: Extensions › Apps Script › Deploy › New deployment › ⚙ Web app › Execute as: Me · Who has access: Anyone › Deploy\n' +
+      'بعد آدرس Web app (که با /exec تمام می‌شود) را اینجا بچسبانید:', ui.ButtonSet.OK_CANCEL);
+    if (r.getSelectedButton() !== ui.Button.OK) return;
+    url = String(r.getResponseText() || '').trim();
+    if (!EXEC_RE.test(url)) { ui.alert('این آدرس Web App نیست. Deploy › Manage deployments › Web app URL را کاپی کنید (با /exec تمام می‌شود).'); return; }
+    props.setProperty('WEBAPP_URL', url);
   }
   var html = HtmlService.createHtmlOutput(pairingHtml(pairingPayload(url, token), url, token)).setWidth(420).setHeight(560);
   ui.showModalDialog(html, 'اتصال گوشی');
@@ -309,11 +321,21 @@ function htmlEsc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt
 function pairingHtml(payload, url, token) {
   var js = JSON.stringify(payload).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
   return '<!doctype html><html dir="rtl"><head><meta charset="utf-8">' +
-    '<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>' +
+    '<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js" integrity="sha512-ZDSPMa/JM1D+7kdg2x3BsruQ6T/JpJo3jWDWkCZsP+5yVyp1KfESqLI+7RqB5k24F7p2cV7i2YHh/890y6P6Sw==" crossorigin="anonymous"></script>' +
     '<style>body{font-family:Tahoma,sans-serif;text-align:center;margin:8px}#q svg{width:300px;height:300px}code{direction:ltr;display:block;word-break:break-all;font-size:11px;background:#f2f4f9;padding:6px;border-radius:6px;margin:4px 0}</style></head><body>' +
     '<p><b>در گوشی: تنظیمات › «اتصال با QR» › این را اسکن کنید</b></p><div id="q"></div>' +
     '<p style="color:#a00">این QR کلید فروشگاه است — به کسی نشان ندهید.</p>' +
     '<details><summary>وارد کردن دستی</summary><code>' + htmlEsc(url) + '</code><code>' + htmlEsc(token) + '</code></details>' +
     '<script>var q=qrcode(0,"M");q.addData(' + js + ');q.make();document.getElementById("q").innerHTML=q.createSvgTag({cellSize:6,margin:2});</script>' +
     '</body></html>';
+}
+
+/** If the QR/key was seen by someone else: make a new key. Every phone must scan the new QR. */
+function newKey() {
+  var ui = SpreadsheetApp.getUi();
+  var ok = ui.alert('کلید نو', 'بعد از این، همه گوشی‌ها باید QR نو را دوباره اسکن کنند. ادامه؟', ui.ButtonSet.OK_CANCEL);
+  if (ok !== ui.Button.OK) return;
+  PropertiesService.getScriptProperties().setProperty('SYNC_TOKEN', Utilities.getUuid().replace(/-/g, ''));
+  setup();
+  showPairing();
 }
