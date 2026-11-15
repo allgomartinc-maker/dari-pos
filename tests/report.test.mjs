@@ -78,3 +78,25 @@ test('solarMonthStart: 14 Nov 2026 is 23 Aqrab, so the month began 23 Oct 2026 (
   const d = solarMonthStart(new Date(2026, 10, 14, 15));
   assert.deepEqual([d.getFullYear(), d.getMonth() + 1, d.getDate()], [2026, 10, 23]);
 });
+
+test('qarz in reports: sales split into cash and qarz', () => {
+  const s = summarizeSales([
+    { receiptId: 'X', timestamp: at('01'), total: 500000, cashReceived: 500000, changeGiven: 0, items: [] },
+    { receiptId: 'Y', timestamp: at('01'), total: 800000, cashReceived: 200000, changeGiven: 0, credit: 600000, customerId: 'c', items: [] }
+  ]);
+  assert.equal(s.cash, 700000);
+  assert.equal(s.credit, 600000);
+});
+
+test('qarz in reports: file has qarz totals and per-line qarz columns; text mentions them', () => {
+  const r = dayRange('2026-11-01', '2026-11-06');
+  const qsales = [{ receiptId: 'Q', timestamp: at('02'), total: 3000, cashReceived: 1000, changeGiven: 0, credit: 2000, customerId: 'c', customerName: 'احمد', cashierName: 'A',
+    items: [{ barcode: '1', name: 'آب', qty: 1, price: 3000, unit: 'pc' }] }];
+  const qarz = { given: 2000, collected: 500, outstanding: 1500 };
+  const csv = reportCsv({ storeName: 'TR', range: r, sum: summarizeSales(qsales), sales: qsales, qarz });
+  assert.match(csv, /qarz_given_afn,20/); assert.match(csv, /qarz_collected_afn,5/); assert.match(csv, /qarz_outstanding_afn,15/);
+  assert.match(csv, /,credit,customer/);
+  assert.match(csv, /\nQ,[^\n]*,20,احمد/);
+  const t = reportText({ storeName: 'TR', range: r, sum: summarizeSales(qsales), qarz });
+  assert.match(t, /قرض داده شده: ۲۰ افغانی/); assert.match(t, /قرض گرفته شده: ۵ افغانی/); assert.match(t, /مجموع قرض مردم: ۱۵ افغانی/);
+});

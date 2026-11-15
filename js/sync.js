@@ -1,9 +1,9 @@
 // Online-only part: pushes queued records to the Google Apps Script web app and pulls users / prices.
 // Everything else works without internet. Records stay synced=0 until the server answers {ok:true}.
 import { db, getSettings, setSetting } from './db.js';
-import { mergePulledProduct } from './logic.js';
+import { mergePulledProduct, syncedTables } from './logic.js';
 
-const TABLES = ['sales', 'receivings', 'shifts', 'movements', 'products'];
+const TABLES = ['sales', 'receivings', 'shifts', 'movements', 'products', 'customers', 'ledger'];
 const BATCH = 200;
 let running = false;
 const listeners = new Set();
@@ -34,18 +34,25 @@ export async function syncNow({ pull = true } = {}) {
   running = true;
   emit({ running: true });
   let sent = 0;
+  let tables = TABLES; // shrinks for this run if the script is too old for qarz, so the loop can't spin on rows it won't take
+  let qarzWaiting = false;
   try {
     for (;;) {
       const payload = { action: 'push', token: s.syncToken, deviceId: s.deviceId, storeName: s.storeName };
       let any = false;
-      for (const t of TABLES) {
+      for (const t of tables) {
         payload[t] = await db[t].where('synced').equals(0).limit(BATCH).toArray();
         if (payload[t].length) any = true;
       }
       if (!any) break;
-      await post(s.webhookUrl, payload);
+      const res = await post(s.webhookUrl, payload);
+      const markable = syncedTables(res.features, tables);
+      if (markable.length < tables.length) {
+        qarzWaiting = qarzWaiting || tables.some((t) => !markable.includes(t) && payload[t]?.length);
+        tables = markable;
+      }
       // Only mark rows that were not edited while the request was in flight.
-      for (const t of TABLES) {
+      for (const t of markable) {
         for (const row of payload[t]) {
           const key = db[t].schema.primKey.keyPath;
           const cur = await db[t].get(row[key]);
@@ -59,6 +66,7 @@ export async function syncNow({ pull = true } = {}) {
       }
     }
     if (pull) await pullUsers(s);
+    await setSetting('qarzScriptMissing', qarzWaiting);
     await setSetting('lastSyncAt', new Date().toISOString());
     await setSetting('lastSyncError', null);
     emit({ running: false, ok: true, sent });

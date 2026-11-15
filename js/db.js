@@ -91,14 +91,8 @@ export async function openShift() {
 }
 
 export async function pendingCount() {
-  const [a, b, c, d, e] = await Promise.all([
-    db.sales.where('synced').equals(0).count(),
-    db.receivings.where('synced').equals(0).count(),
-    db.shifts.where('synced').equals(0).count(),
-    db.movements.where('synced').equals(0).count(),
-    db.products.where('synced').equals(0).count()
-  ]);
-  return a + b + c + d + e;
+  const n = await Promise.all(['sales', 'receivings', 'shifts', 'movements', 'products', 'customers', 'ledger'].map((t) => db[t].where('synced').equals(0).count()));
+  return n.reduce((x, y) => x + y, 0);
 }
 
 export async function exportBackup() {

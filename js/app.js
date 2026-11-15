@@ -13,7 +13,7 @@ import { receiptDoc, paymentSlipDoc, zReportDoc, labelDoc, printHtml, printBluet
 import { initWedge, setScanHandler, startCamera, stopCamera, cameraActive, beep, warmUpScanner, decoderName, upcVariants } from './scanner.js';
 import { $, $$, esc, toast, modal, confirmBox, formBox, keypadHtml, bindPinPad, askPin, download, pickFile } from './ui.js';
 import { icon } from './icons.js';
-import { balanceOf, balancesById, splitQarzPayment, overLimit, findCustomers, ledgerEntry, statementText, LEDGER_LABEL, voidQarzEffects } from './qarz.js';
+import { balanceOf, balancesById, splitQarzPayment, overLimit, findCustomers, ledgerEntry, statementText, LEDGER_LABEL, voidQarzEffects, qarzTotals } from './qarz.js';
 
 // On screen the word «افغانی» is drawn small after the number; plain text (toasts, confirms, receipts) uses formatMoney.
 const m = (p) => `${formatNumber(p)} <small class="cur">افغانی</small>`;
@@ -1458,6 +1458,8 @@ async function renderReports(from, to) {
   const allSales = await db.sales.where('timestamp').between(range.start.toISOString(), range.end.toISOString()).reverse().toArray();
   const sales = realSales(allSales), practiceN = allSales.length - sales.length;
   const sum = summarizeSales(sales);
+  const allLedger = await db.ledger.toArray();
+  const qarz = { ...qarzTotals(allLedger, range), outstanding: [...balancesById(allLedger).values()].reduce((a, r) => a + Math.max(0, r.balance), 0) };
   const topList = sum.top.slice(0, 10);
   const shifts = await db.shifts.orderBy('openedAt').reverse().limit(15).toArray();
   const low = (await db.products.toArray()).filter((p) => (p.stock || 0) <= state.s.lowStock).slice(0, 30);
@@ -1492,6 +1494,11 @@ async function renderReports(from, to) {
       <div class="stat"><div class="k">مفاد ناخالص</div><div class="v">${m(sum.profit)}</div><div class="small muted">${toDariDigits(sum.net ? Math.round((sum.profit / sum.net) * 100) : 0)}٪ از فروش</div></div>
       <div class="stat"><div class="k">باطل شده</div><div class="v">${toDariDigits(sum.voids.n)} · ${m(sum.voids.total)}</div></div>
     </div>
+    ${sum.credit || qarz.given || qarz.collected || qarz.outstanding ? `<div class="grid2 stat-grid">
+      <div class="stat"><div class="k">قرض داده شده</div><div class="v">${m(qarz.given)}</div><div class="small muted">فروش نقد ${m(sum.cash)}</div></div>
+      <div class="stat"><div class="k">قرض گرفته شده</div><div class="v">${m(qarz.collected)}</div></div>
+      <div class="stat"><div class="k">مجموع قرض مردم</div><div class="v">${m(qarz.outstanding)}</div><div class="small muted">همین حالا</div></div>
+    </div>` : ''}
     ${range.days > 1 ? `<div class="card"><h3>روز به روز</h3><div class="table-wrap"><table><thead><tr><th>روز</th><th>فروش</th><th>رسید</th></tr></thead><tbody>
       ${sum.byDay.map((d) => `<tr><td>${esc(dariDate(new Date(d.day + 'T12:00:00'), { time: false }))}</td><td>${m(d.total)}</td><td>${toDariDigits(d.count)}</td></tr>`).join('') || '<tr><td colspan="3" class="empty">فروشی نیست</td></tr>'}
     </tbody></table></div></div>` : ''}
@@ -1515,12 +1522,12 @@ async function renderReports(from, to) {
   $('#shiftRows').onclick = async (e) => { const id = e.target.closest('[data-sh]')?.dataset.sh; if (!id) return; const sh = await db.shifts.get(id); if (sh.closedAt) showShiftResult(sh); };
   $('#scanRcpt').onclick = (e) => toggleCamera('camBox', reportsCode, e.currentTarget);
   const fileName = `report-${range.from}${range.days > 1 ? '_' + range.to : ''}.csv`;
-  const makeFile = () => reportCsv({ storeName: s.storeName, range, sum, sales });
+  const makeFile = () => reportCsv({ storeName: s.storeName, range, sum, sales, qarz });
   $('#dlRep').onclick = () => { download(fileName, makeFile(), 'text/csv;charset=utf-8'); toast('فایل دانلود شد', 'ok'); };
   $('#sendRep').onclick = () => sendReport({
     file: new File([makeFile()], fileName, { type: 'text/csv' }),
     subject: `گزارش فروش ${s.storeName || ''} — ${label}`.trim(),
-    text: reportText({ storeName: s.storeName, range, sum })
+    text: reportText({ storeName: s.storeName, range, sum, qarz })
   });
 }
 
@@ -1557,6 +1564,7 @@ async function renderSettings() {
   const persisted = navigator.storage?.persisted ? await navigator.storage.persisted() : false;
   $('#main').innerHTML = `<div class="stack">
     <form class="card stack" id="sf"><h2>⚙️ تنظیمات فروشگاه</h2>
+      ${s.qarzScriptMissing ? '<div class="status-warn"><span>☁️ اسکریپت گوگل شیت را به‌روز کنید — قرض‌ها در این گوشی منتظر هستند و هنوز به شیت نرفته‌اند. فایل Code.gs نو را بچسبانید، setup را اجرا کنید و نسخه نو را Deploy کنید.</span></div>' : ''}
       <div class="muted small">نسخه رایگان: <b class="ltr">${esc(await appVersion() || '—')}</b> · اسکنر: <b class="ltr">${esc(decoderName || '—')}</b> · ${isStandalone() ? '✔ نصب شده' : '✖ نصب نشده'}</div>
       <div class="install-box"></div>
       <div class="grid2">

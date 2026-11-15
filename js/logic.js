@@ -360,8 +360,9 @@ export function summarizeSales(sales) {
     const d = days.get(k) || { day: k, total: 0, count: 0 };
     d.total += s.total; d.count++; days.set(k, d);
   }
+  const credit = good.reduce((a, s) => a + (s.credit || 0), 0);
   return {
-    net, cost, profit: net - cost, count: good.length,
+    net, cost, profit: net - cost, count: good.length, cash: net - credit, credit,
     voids: { n: voided.length, total: voided.reduce((a, s) => a + s.total, 0) },
     top: [...top.values()].sort((a, b) => b.total - a.total),
     byDay: [...days.values()].sort((a, b) => a.day.localeCompare(b.day))
@@ -369,7 +370,7 @@ export function summarizeSales(sales) {
 }
 
 /** Plain Dari text of a report, for the body of an email or a message. */
-export function reportText({ storeName, range, sum }) {
+export function reportText({ storeName, range, sum, qarz }) {
   const when = range.days === 1 ? dariDate(range.start, { time: false })
     : `از ${dariDate(range.start, { time: false })} تا ${dariDate(localDay(range.to), { time: false })}`;
   const lines = [
@@ -379,6 +380,9 @@ export function reportText({ storeName, range, sum }) {
     `تعداد رسید: ${toDariDigits(sum.count)}`,
     `باطل شده: ${toDariDigits(sum.voids.n)} (${formatMoney(sum.voids.total)})`
   ];
+  if (qarz && (qarz.given || qarz.collected || qarz.outstanding)) {
+    lines.push('', `قرض داده شده: ${formatMoney(qarz.given)}`, `قرض گرفته شده: ${formatMoney(qarz.collected)}`, `مجموع قرض مردم: ${formatMoney(qarz.outstanding)}`);
+  }
   if (sum.byDay.length > 1) {
     lines.push('', 'روز به روز:');
     for (const d of sum.byDay) lines.push(`${dariDate(localDay(d.day), { time: false })}: ${formatMoney(d.total)} · ${toDariDigits(d.count)} رسید`);
@@ -396,18 +400,19 @@ const localTime = (ts) => { const d = new Date(ts); return `${isoDay(d)} ${Strin
 const safeText = (v) => (/^[=+\-@]/.test(String(v ?? '')) ? `'${v}` : v ?? '');
 
 /** One CSV (UTF-8 with BOM so Excel shows Dari): summary, per-day totals, then every sold line. */
-export function reportCsv({ storeName, range, sum, sales }) {
+export function reportCsv({ storeName, range, sum, sales, qarz = { given: 0, collected: 0, outstanding: 0 } }) {
   const afn = (p) => p / 100;
   const rows = [
     ['store', safeText(storeName)], ['from', range.from], ['to', range.to],
     ['net_sales_afn', afn(sum.net)], ['gross_profit_afn', afn(sum.profit)], ['receipts', sum.count],
-    ['voided', sum.voids.n], ['voided_afn', afn(sum.voids.total)], [],
+    ['voided', sum.voids.n], ['voided_afn', afn(sum.voids.total)],
+    ['qarz_given_afn', afn(qarz.given)], ['qarz_collected_afn', afn(qarz.collected)], ['qarz_outstanding_afn', afn(qarz.outstanding)], [],
     ['day', 'sales_afn', 'receipts'], ...sum.byDay.map((d) => [d.day, afn(d.total), d.count]), [],
-    ['receiptId', 'timestamp', 'cashier', 'barcode', 'item', 'qty', 'unit', 'price', 'lineTotal', 'receiptTotal', 'cashReceived', 'change', 'voided']
+    ['receiptId', 'timestamp', 'cashier', 'barcode', 'item', 'qty', 'unit', 'price', 'lineTotal', 'receiptTotal', 'cashReceived', 'change', 'voided', 'credit', 'customer']
   ];
   for (const x of sales) for (const l of x.items) {
     rows.push([x.receiptId, localTime(x.timestamp), safeText(x.cashierName), l.barcode, safeText(l.name), l.qty, l.unit || 'pc', afn(l.price), afn(lineTotal(l)),
-      afn(x.total), afn(x.cashReceived || 0), afn(x.changeGiven || 0), x.voided ? 1 : 0]);
+      afn(x.total), afn(x.cashReceived || 0), afn(x.changeGiven || 0), x.voided ? 1 : 0, afn(x.credit || 0), safeText(x.customerName || '')]);
   }
   return '﻿' + toCsv(rows);
 }
@@ -468,4 +473,11 @@ export function prepareSecondTill(data) {
   t.products = (t.products || []).map((p) => ({ ...p, stock: 0 }));
   for (const k of ['sales', 'shifts', 'movements', 'receivings', 'customers', 'ledger']) t[k] = [];
   return data;
+}
+
+// Tables the app may mark as sent after a push. An older Google script answers ok but silently drops qarz
+// rows, so customers / ledger stay queued until the script reports it knows 'qarz'.
+const QARZ_TABLES = ['customers', 'ledger'];
+export function syncedTables(features, tables) {
+  return (features || []).includes('qarz') ? tables : tables.filter((t) => !QARZ_TABLES.includes(t));
 }

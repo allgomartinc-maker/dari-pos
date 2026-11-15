@@ -196,3 +196,36 @@ test('editing a price directly in the sheet stamps it, so an older till edit can
   call({ action: 'push', token, deviceId: 'T1', products: [priced({ price: 8200, priceAt: '2026-02-01T09:00:00Z' })] });
   assert.equal(sheets.Inventory.rows[r - 1][2], 95);
 });
+
+test('qarz: push fills Qarz_Customers / Qarz_Ledger, recomputes still owes, and says the script knows qarz', () => {
+  const { sheets, props, call } = load();
+  const token = props.SYNC_TOKEN;
+  const qs = { ...sale(), receiptId: 'T1-261105-0002', cashReceived: 2000, changeGiven: 0, credit: 30000, customerId: 'c1', customerName: 'احمد', total: 32000 };
+  const r = call({ action: 'push', token, deviceId: 'T1', sales: [qs],
+    customers: [{ id: 'c1', name: 'احمد', phone: '0799123456', limit: 0, updatedAt: '2026-11-05T10:00:00Z' }],
+    ledger: [
+      { id: 'l1', customerId: 'c1', customerName: 'احمد', type: 'sale', amount: 30000, receiptId: 'T1-261105-0002', shiftId: 'S1', by: 'Ali', timestamp: '2026-11-05T10:00:00Z' },
+      { id: 'l2', customerId: 'c1', customerName: 'احمد', type: 'payment', amount: -10000, shiftId: 'S1', by: 'Ali', timestamp: '2026-11-05T11:00:00Z' }
+    ] });
+  assert.equal(r.ok, true);
+  assert.ok(r.features.includes('qarz'));
+  const cust = sheets.Qarz_Customers.rows[1];
+  assert.equal(cust[0], 'c1'); assert.equal(cust[1], 'احمد'); assert.equal(cust[4], 200); assert.equal(cust[6], 'Active');
+  assert.equal(sheets.Qarz_Ledger.rows.length, 3);
+  assert.equal(sheets.Qarz_Ledger.rows[1][5], 300);
+  const srow = sheets.Sales.rows.find((x) => x[0] === 'T1-261105-0002');
+  assert.deepEqual(srow.slice(-2), [300, 'احمد']);
+  // a later push of only the ledger updates the total; a deleted customer is marked
+  call({ action: 'push', token, deviceId: 'T1', ledger: [{ id: 'l3', customerId: 'c1', customerName: 'احمد', type: 'payment', amount: -20000, timestamp: '2026-11-06T10:00:00Z' }],
+    customers: [{ id: 'c1', name: 'احمد', deleted: 1, updatedAt: '2026-11-06T10:00:00Z' }] });
+  assert.equal(sheets.Qarz_Customers.rows[1][4], 0);
+  assert.equal(sheets.Qarz_Customers.rows[1][6], 'Deleted');
+});
+
+test('qarz: shift row ends with qarz collected', () => {
+  const { sheets, props, call } = load();
+  call({ action: 'push', token: props.SYNC_TOKEN, deviceId: 'T1', shifts: [{ shiftId: 'S1', cashierName: 'Ali', status: 'closed', openedAt: '2026-11-05T08:00:00Z', closedAt: '2026-11-05T18:00:00Z',
+    startingFloat: 100000, netCash: 0, payins: 0, payouts: 0, drops: 0, expectedCash: 150000, countedCash: 150000, variance: 0, qarzIn: 50000, txCount: 0 }] });
+  const row = sheets.Shift_Reconciliation.rows[1];
+  assert.equal(row[row.length - 1], 500);
+});

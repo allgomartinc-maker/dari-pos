@@ -14,17 +14,22 @@
 
 var TABS = {
   Sales: ['Receipt ID / شماره رسید', 'Time / زمان', 'Shift / شفت', 'Cashier / صندوقدار', 'Total / مجموع', 'Cash Tendered / نقد دریافتی',
-    'Change / باقی', 'Items / تعداد', 'Items Summary / اجناس', 'Status / وضعیت', 'Device / دستگاه', 'Synced At / زمان همگام', 'Cost / قیمت خرید', 'Profit / مفاد', 'Voided By / باطل توسط'],
+    'Change / باقی', 'Items / تعداد', 'Items Summary / اجناس', 'Status / وضعیت', 'Device / دستگاه', 'Synced At / زمان همگام', 'Cost / قیمت خرید', 'Profit / مفاد', 'Voided By / باطل توسط', 'Credit / قرض', 'Customer / مشتری'],
   Sale_Items: ['Receipt ID / شماره رسید', 'Time / زمان', 'Barcode / بارکد', 'Item / جنس', 'Qty / تعداد', 'Price / قیمت', 'Line Total / مجموع', 'Unit Cost / قیمت خرید', 'Price Override / تغییر قیمت', 'Key'],
   Inventory: ['Barcode / بارکد', 'Name / نام', 'Price / قیمت فروش', 'Cost / قیمت خرید', 'Stock (all tills) / موجودی کل', 'Margin % / مفاد', 'Quick / سریع', 'Price Updated / زمان تغییر قیمت', 'Device / دستگاه', 'Unit / واحد (pc / kg)'],
   Purchases: ['ID', 'Time / زمان', 'Batch / محموله', 'Supplier / عرضه‌کننده', 'Invoice / فاکتور', 'Barcode / بارکد', 'Item / جنس', 'Qty / تعداد', 'Unit Cost / قیمت خرید', 'Retail / قیمت فروش', 'Line Cost / مجموع', 'Received By / دریافت کننده', 'Price Changed / تغییر قیمت'],
   Shift_Reconciliation: ['Shift ID / شفت', 'Cashier / صندوقدار', 'Opened / باز شد', 'Closed / بسته شد', 'Start Float / پول آغاز', 'Net Cash Sales / فروش خالص', 'Pay-ins / افزوده',
-    'Payouts / مصارف', 'Drops / برداشت', 'Expected / متوقع', 'Counted / شمارش', 'Variance / تفاوت', 'Status / وضعیت', 'Transactions / معاملات', 'Closed By / بسته کننده', 'Denominations / نوت‌ها'],
+    'Payouts / مصارف', 'Drops / برداشت', 'Expected / متوقع', 'Counted / شمارش', 'Variance / تفاوت', 'Status / وضعیت', 'Transactions / معاملات', 'Closed By / بسته کننده', 'Denominations / نوت‌ها', 'Qarz in / دریافت قرض'],
   Cash_Movements: ['ID', 'Time / زمان', 'Shift / شفت', 'Type / نوع', 'Amount / مبلغ', 'Note / یادداشت', 'User / کاربر', 'Approved By / تأیید'],
   Users: ['Name / نام', 'Role (admin / cashier)', 'PIN / رمز', 'Active / فعال (TRUE/FALSE)'],
   // Each till reports only its own stock here; Inventory's stock column is the sum, so tills never overwrite each other.
-  Stock_By_Device: ['Key', 'Barcode / بارکد', 'Device / دستگاه', 'Stock / موجودی این دستگاه', 'Updated / به‌روز شده']
+  Stock_By_Device: ['Key', 'Barcode / بارکد', 'Device / دستگاه', 'Stock / موجودی این دستگاه', 'Updated / به‌روز شده'],
+  // Qarz (customer credit). "Still owes" is recomputed from Qarz_Ledger after every push.
+  Qarz_Customers: ['ID', 'Name / نام', 'Phone / تلفن', 'Limit / حد', 'Still owes / مانده', 'Last activity / آخرین', 'Status / وضعیت', 'Device / دستگاه'],
+  Qarz_Ledger: ['ID', 'Time / زمان', 'Customer ID', 'Name / نام', 'Type / نوع', 'Amount / مبلغ', 'Receipt / رسید', 'Shift / شفت', 'By / توسط', 'Note / یادداشت', 'Device / دستگاه']
 };
+// Tells the app what this script can store; the app keeps qarz rows queued until it sees 'qarz'.
+var FEATURES = ['qarz'];
 
 function setup() {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -35,7 +40,7 @@ function setup() {
     sh.setRightToLeft(true);
   });
   // Keep barcodes / PINs as text so leading zeros survive (012000000133, 0123)
-  [['Inventory', 'A:A'], ['Purchases', 'F:F'], ['Sale_Items', 'C:C'], ['Sale_Items', 'J:J'], ['Users', 'C:C'], ['Stock_By_Device', 'A:B']].forEach(function (x) {
+  [['Inventory', 'A:A'], ['Purchases', 'F:F'], ['Sale_Items', 'C:C'], ['Sale_Items', 'J:J'], ['Users', 'C:C'], ['Stock_By_Device', 'A:B'], ['Qarz_Customers', 'C:C']].forEach(function (x) {
     ss.getSheetByName(x[0]).getRange(x[1]).setNumberFormat('@');
   });
   // Variance colours: red short, yellow over, green balanced
@@ -91,8 +96,8 @@ function doPost(e) {
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     if (body.action === 'push') return json(push(ss, body));
-    if (body.action === 'users') return json({ ok: true, users: users(ss) });
-    if (body.action === 'products') return json({ ok: true, products: products(ss, body.deviceId || '') });
+    if (body.action === 'users') return json({ ok: true, users: users(ss), features: FEATURES });
+    if (body.action === 'products') return json({ ok: true, products: products(ss, body.deviceId || ''), features: FEATURES });
     return json({ ok: false, error: 'unknown action' });
   } catch (err) {
     return json({ ok: false, error: String(err) });
@@ -166,7 +171,7 @@ function push(ss, b) {
     });
     return [s.receiptId, dt(s.timestamp), s.shiftId, s.cashierName, afn(s.total), afn(s.cashReceived), afn(s.changeGiven), qty,
       s.items.map(function (l) { return l.name + ' ×' + l.qty + (l.unit === 'kg' ? ' kg' : ''); }).join('، '), s.voided ? 'Voided' : 'Completed', dev, now,
-      afn(cost), s.voided ? 0 : afn(s.total - cost), s.voidedBy || ''];
+      afn(cost), s.voided ? 0 : afn(s.total - cost), s.voidedBy || '', afn(s.credit || 0), s.customerName || ''];
   }));
   upsert(ss.getSheetByName('Sale_Items'), 10, items);
   var prods = b.products || [];
@@ -197,12 +202,37 @@ function push(ss, b) {
     var status = !closed ? 'Open' : (s.variance === 0 ? 'Balanced' : (s.variance < 0 ? 'Short' : 'Over'));
     return [s.shiftId, s.cashierName, dt(s.openedAt), dt(s.closedAt), afn(s.startingFloat), closed ? afn(s.netCash) : '', closed ? afn(s.payins) : '',
       closed ? afn(s.payouts) : '', closed ? afn(s.drops) : '', closed ? afn(s.expectedCash) : '', closed ? afn(s.countedCash) : '',
-      closed ? afn(s.variance) : '', status, closed ? s.txCount : '', s.closedBy || '', s.denoms ? JSON.stringify(s.denoms) : ''];
+      closed ? afn(s.variance) : '', status, closed ? s.txCount : '', s.closedBy || '', s.denoms ? JSON.stringify(s.denoms) : '', closed ? afn(s.qarzIn || 0) : ''];
   }));
   upsert(ss.getSheetByName('Cash_Movements'), 1, (b.movements || []).map(function (m) {
     return [m.id, dt(m.timestamp), m.shiftId, m.type, afn(m.amount), m.note, m.userName, m.approvedBy];
   }));
-  return { ok: true, received: sales.length };
+  var custs = b.customers || [], led = b.ledger || [];
+  if (custs.length || led.length) {
+    upsert(tab(ss, 'Qarz_Ledger'), 1, led.map(function (x) {
+      return [x.id, dt(x.timestamp), x.customerId, x.customerName || '', x.type, afn(x.amount), x.receiptId || '', x.shiftId || '', x.by || '', x.note || '', dev];
+    }));
+    upsert(tab(ss, 'Qarz_Customers'), 1, custs.map(function (c) {
+      return [c.id, c.name || '', c.phone ? String(c.phone) : '', afn(c.limit || 0), 0, dt(c.updatedAt), c.deleted ? 'Deleted' : 'Active', dev];
+    }));
+    qarzBalances(ss);
+  }
+  return { ok: true, received: sales.length, features: FEATURES };
+}
+
+/** Recompute "Still owes" (column E) for every customer from the whole ledger tab. */
+function qarzBalances(ss) {
+  var led = tab(ss, 'Qarz_Ledger'), cus = tab(ss, 'Qarz_Customers'), owed = {};
+  if (led.getLastRow() > 1) {
+    led.getRange(2, 1, led.getLastRow() - 1, 6).getValues().forEach(function (r) {
+      if (r[0] === '') return;
+      owed[String(r[2])] = Math.round(((owed[String(r[2])] || 0) + (Number(r[5]) || 0)) * 100) / 100;
+    });
+  }
+  var n = cus.getLastRow() - 1;
+  if (n < 1) return;
+  var ids = cus.getRange(2, 1, n, 1).getValues();
+  cus.getRange(2, 5, n, 1).setValues(ids.map(function (r) { return [owed[String(r[0])] || 0]; }));
 }
 
 function sha256hex(s) {
