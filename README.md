@@ -110,7 +110,7 @@ Dexie.js (Apache-2.0) · html5-qrcode / ZXing (Apache-2.0) · qrcode-generator (
 ## Moving to a new phone
 
 1. Old phone: **Settings › «انتقال به گوشی نو»**. The share menu opens with a `dari-pos-move-….txt` file. Send it only to yourself (WhatsApp, Telegram, Bluetooth). It holds staff PIN hashes and the sync key.
-2. New phone: open the app › **«انتقال از گوشی قبلی»** › pick that file.
+2. New phone (Android, app installed on the home screen): in WhatsApp, long-press the file › Share ↗ › **صندوق دری**. The app opens straight at the move question. This uses the manifest's `share_target`, and the service worker holds the file in the `dari-pos-shared` cache. Without the app installed, or on iPhone: open the app › **«انتقال از گوشی قبلی»** › pick the file (the picker shows all files). If the phone already has a shop, the manager PIN is asked before anything is replaced.
 3. Answer «گوشی قبلی هنوز فروش می‌کند؟» (is the old phone still selling?):
    - **No:** everything moves, with the same device code.
    - **Yes:** the new phone becomes the next till (T1 → T2). It gets the same staff and products, but no old sales and stock starting at 0.

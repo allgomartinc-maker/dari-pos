@@ -33,5 +33,25 @@
       "type": "image/svg+xml"
     }
   ],
-  "description": "صندوق فروش آفلاین و رایگان به زبان دری — بدون انترنت کار می‌کند"
+  "description": "صندوق فروش آفلاین و رایگان به زبان دری — بدون انترنت کار می‌کند",
+  "share_target": {
+    "action": "./share-target",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "files": [
+        {
+          "name": "file",
+          "accept": [
+            "text/plain",
+            ".txt",
+            "application/json",
+            ".json"
+          ]
+        }
+      ]
+    }
+  }
 }

@@ -97,6 +97,32 @@ async function boot() {
   startAutoSync();
   idleLock();
   if (!state.s.setupDone) renderSetup(); else renderLock();
+  const shared = await takeSharedFile();
+  if (shared === false) toast('فایل دریافت نشد — دوباره از واتساپ بفرستید', 'err');
+  else if (shared) openSharedMove(shared);
+}
+
+/** A file shared to the app (WhatsApp › Share › صندوق دری) waits in the service worker's cache. null = nothing shared. */
+async function takeSharedFile() {
+  if (new URLSearchParams(location.search).get('share') !== '1') return null;
+  history.replaceState(null, '', location.pathname);
+  try {
+    const c = await caches.open('dari-pos-shared');
+    const res = await c.match('shared-file');
+    if (!res) return false;
+    await c.delete('shared-file');
+    const name = decodeURIComponent(res.headers.get('x-file-name') || 'move.txt');
+    return new File([await res.blob()], name, { type: 'text/plain' });
+  } catch { return false; }
+}
+
+async function openSharedMove(file) {
+  if (!state.s.setupDone) return moveIn(file);
+  // This phone already runs a shop: only its manager may replace it.
+  const u = await askPin('این گوشی صندوق دارد — برای جایگزینی با فایل انتقال، رمز مدیر را بزنید', { role: 'admin' });
+  if (!u) return;
+  if (!(await confirmBox('همه اطلاعات فعلی این گوشی با فایل انتقال جایگزین شود؟', { danger: true, okText: 'جایگزین شود' }))) return;
+  moveIn(file);
 }
 
 // Downloads a full backup and remembers when, so the app can remind the manager.
@@ -161,7 +187,7 @@ async function refreshBadge() {
 }
 
 // ====================================================================== setup & lock
-const BACKUP_FILES = '.txt,.json,text/plain,application/json';
+const BACKUP_FILES = ''; // every file: Android hides WhatsApp's folder less when nothing is filtered
 
 /** First screen on a new phone: start a new shop, or bring one over from the old phone. */
 function renderSetup() {
@@ -171,21 +197,22 @@ function renderSetup() {
     <div class="lock-mark" aria-hidden="true">؋</div>
     <h2>صندوق دری</h2>
     <button class="btn primary big choice" id="chNew">${icon('cart')}<span><b>فروشگاه نو</b><small>اولین بار است که این صندوق را راه می‌اندازید</small></span></button>
-    <button class="btn big choice" id="chMove">${icon('download')}<span><b>انتقال از گوشی قبلی</b><small>فایل «انتقال به گوشی نو» را از واتساپ یا تلگرام انتخاب کنید</small></span></button>
+    <button class="btn big choice" id="chMove">${icon('download')}<span><b>انتقال از گوشی قبلی</b><small>یا در واتساپ: فایل را نگه دارید › اشتراک ↗ › صندوق دری</small></span></button>
   </div></div>`;
   refreshInstallBoxes();
   $('#chNew').onclick = renderNewShop;
-  $('#chMove').onclick = moveIn;
+  $('#chMove').onclick = () => moveIn();
 }
 
-async function moveIn() {
-  const f = await pickFile(BACKUP_FILES);
+async function moveIn(shared) {
+  const f = shared instanceof File ? shared : await pickFile(BACKUP_FILES);
   if (!f) return;
   let data;
   try { data = cleanBackup(JSON.parse(await f.text())); }
   catch { return toast('این فایل انتقال صندوق نیست — فایل «dari-pos-move» را انتخاب کنید', 'err'); }
   const old = (data.tables.settings || []).find((r) => r.key === 'deviceId')?.value || 'T1';
-  const keep = await new Promise((resolve) => modal(`<h2>گوشی قبلی هنوز فروش می‌کند؟</h2>
+  const store = (data.tables.settings || []).find((r) => r.key === 'storeName')?.value || '';
+  const keep = await new Promise((resolve) => modal(`<p class="muted move-from">فایل انتقال: <b>${esc(store)}</b> · ${esc(old)}</p><h2>گوشی قبلی هنوز فروش می‌کند؟</h2>
     <div class="stack">
       <button class="btn primary big choice" data-a="move">${icon('check')}<span><b>نه — همه چیز به این گوشی بیاید</b><small>همان کد ${esc(old)}، همه فروش‌ها، شفت‌ها و موجودی</small></span></button>
       <button class="btn big choice" data-a="second">${icon('cart')}<span><b>بلی — این گوشی صندوق دوم شود</b><small>کد نو ${esc(nextDeviceId(old))}، همان کاربران و اجناس، موجودی از صفر</small></span></button>
@@ -1237,7 +1264,7 @@ async function renderSettings() {
       <div class="row"><button class="btn" id="testPrint">چاپ آزمایشی</button>
       ${bluetoothSupported() ? `<button class="btn" id="btConnect">وصل کردن چاپگر بلوتوث ${bluetoothName() ? '(' + esc(bluetoothName()) + ')' : ''}</button><button class="btn" id="btTest">آزمایش بلوتوث</button>` : '<span class="muted small">این مرورگر بلوتوث را پشتیبانی نمی‌کند</span>'}</div></div>
     <div class="card stack move-card"><h2>📲 انتقال به گوشی نو</h2>
-      <p class="muted small">یک فایل ساخته می‌شود که همه چیز این صندوق را دارد: کاربران و رمزها، اجناس، موجودی، فروش‌ها و تنظیمات. آن را فقط برای خودتان بفرستید (واتساپ، تلگرام، بلوتوث)، بعد در گوشی نو «انتقال از گوشی قبلی» را بزنید.</p>
+      <p class="muted small">یک فایل ساخته می‌شود که همه چیز این صندوق را دارد: کاربران و رمزها، اجناس، موجودی، فروش‌ها و تنظیمات. آن را فقط برای خودتان در واتساپ بفرستید. در گوشی نو (اپ نصب شده روی صفحه اصلی): در واتساپ فایل را نگه دارید › اشتراک ↗ › «صندوق دری».</p>
       <button class="btn primary big" id="moveOut">${icon('share')} انتقال به گوشی نو</button></div>
     <div class="card stack"><h2>💾 پشتیبان</h2>
       <p><b>آخرین پشتیبان: ${esc(timeAgo(s.lastBackupAt))}</b>${s.lastBackupAt ? ` <span class="muted small">(${esc(dariDate(s.lastBackupAt))})</span>` : ''}</p>

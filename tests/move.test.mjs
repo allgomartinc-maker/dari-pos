@@ -58,3 +58,13 @@ test('cleanBackup keeps the device code to letters and digits', () => {
   const d = backup(); d.tables.settings[0].value = 't1<img src=x>';
   assert.equal(cleanBackup(d).tables.settings[0].value, 'T1IMGS');
 });
+
+test('cleanBackup drops a sync address that is not a Google Apps Script link', () => {
+  const d = backup(); d.tables.settings.push({ key: 'webhookUrl', value: 'https://evil.example/collect' }, { key: 'syncToken', value: 'abc' });
+  const set = Object.fromEntries(cleanBackup(d).tables.settings.map((r) => [r.key, r.value]));
+  assert.equal(set.webhookUrl, '');
+  const ok = backup(); ok.tables.settings.push({ key: 'webhookUrl', value: 'https://script.google.com/macros/s/AKfy/exec' });
+  const ws = backup(); ws.tables.settings.push({ key: 'webhookUrl', value: 'https://script.google.com/a/macros/shop.af/s/AKfy_1-x/exec' });
+  assert.match(Object.fromEntries(cleanBackup(ws).tables.settings.map((r) => [r.key, r.value])).webhookUrl, /shop\.af/);
+  assert.equal(Object.fromEntries(cleanBackup(ok).tables.settings.map((r) => [r.key, r.value])).webhookUrl, 'https://script.google.com/macros/s/AKfy/exec');
+});

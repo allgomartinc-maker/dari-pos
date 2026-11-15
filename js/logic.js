@@ -435,6 +435,8 @@ export function cleanBackup(data) {
     for (const k of ['startingFloat', 'countedCash', 'expectedCash', 'variance', 'netCash', 'payouts', 'drops', 'payins', 'grossSales', 'voidTotal', 'txCount']) if (k in s) s[k] = pul(s[k]);
     if (s.varianceStatus && !['balanced', 'short', 'over'].includes(s.varianceStatus)) s.varianceStatus = '';
   }
+  // Sales only ever go to a Google Apps Script web app; a file pointing anywhere else loses the address.
+  for (const r of t.settings || []) if (r.key === 'webhookUrl' && !/^https:\/\/script\.google\.com\/(a\/macros\/[\w.-]+|macros)\/s\/[\w-]+\/exec$/.test(String(r.value ?? ''))) r.value = '';
   for (const r of t.settings || []) if (r.key === 'deviceId') r.value = String(r.value ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6) || 'T1';
   return data;
 }
