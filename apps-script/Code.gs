@@ -273,3 +273,47 @@ function products(ss, dev) {
   upsert(tab(ss, 'Stock_By_Device'), 1, claims);
   return list;
 }
+
+
+// ---------- easy setup: menu + pairing QR ----------
+/** Simple trigger: adds the «صندوق دری» menu when the Sheet opens. */
+function onOpen() {
+  SpreadsheetApp.getUi().createMenu('صندوق دری')
+    .addItem('راه‌اندازی', 'setup')
+    .addItem('QR اتصال', 'showPairing')
+    .addToUi();
+}
+
+/** Same format the app reads (parsePairing in js/logic.js). */
+function pairingPayload(url, token) { return 'DPOS|S|' + url + '|' + token; }
+
+/** Shows the QR the phone scans in Settings › «اتصال با QR». Only Sheet editors can open this menu. */
+function showPairing() {
+  var ui = SpreadsheetApp.getUi();
+  var props = PropertiesService.getScriptProperties();
+  var token = props.getProperty('SYNC_TOKEN');
+  if (!token) { setup(); token = props.getProperty('SYNC_TOKEN'); }
+  var url = ScriptApp.getService().getUrl();
+  if (!url) {
+    ui.alert('اول Deploy کنید',
+      'Extensions › Apps Script › Deploy › New deployment › ⚙ Web app\nExecute as: Me · Who has access: Anyone › Deploy\nبعد دوباره «QR اتصال» را بزنید.', ui.ButtonSet ? ui.ButtonSet.OK : undefined);
+    return;
+  }
+  var html = HtmlService.createHtmlOutput(pairingHtml(pairingPayload(url, token), url, token)).setWidth(420).setHeight(560);
+  ui.showModalDialog(html, 'اتصال گوشی');
+}
+
+function htmlEsc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+
+/** Dialog page: the QR is drawn in the browser (qrcode-generator, MIT), so the key is never sent to any QR service. */
+function pairingHtml(payload, url, token) {
+  var js = JSON.stringify(payload).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
+  return '<!doctype html><html dir="rtl"><head><meta charset="utf-8">' +
+    '<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>' +
+    '<style>body{font-family:Tahoma,sans-serif;text-align:center;margin:8px}#q svg{width:300px;height:300px}code{direction:ltr;display:block;word-break:break-all;font-size:11px;background:#f2f4f9;padding:6px;border-radius:6px;margin:4px 0}</style></head><body>' +
+    '<p><b>در گوشی: تنظیمات › «اتصال با QR» › این را اسکن کنید</b></p><div id="q"></div>' +
+    '<p style="color:#a00">این QR کلید فروشگاه است — به کسی نشان ندهید.</p>' +
+    '<details><summary>وارد کردن دستی</summary><code>' + htmlEsc(url) + '</code><code>' + htmlEsc(token) + '</code></details>' +
+    '<script>var q=qrcode(0,"M");q.addData(' + js + ');q.make();document.getElementById("q").innerHTML=q.createSvgTag({cellSize:6,margin:2});</script>' +
+    '</body></html>';
+}

@@ -229,3 +229,24 @@ test('qarz: shift row ends with qarz collected', () => {
   const row = sheets.Shift_Reconciliation.rows[1];
   assert.equal(row[row.length - 1], 500);
 });
+
+test('pairing: payload format matches the app, menu exists, undeployed script explains Deploy', () => {
+  const { ctx, props } = load();
+  assert.equal(ctx.pairingPayload('https://script.google.com/macros/s/A/exec', 'tok'), 'DPOS|S|https://script.google.com/macros/s/A/exec|tok');
+  const alerts = [], items = [];
+  const menu = { addItem(t, f) { items.push([t, f]); return this; }, addToUi() { items.done = true; } };
+  ctx.SpreadsheetApp.getUi = () => ({ createMenu: () => menu, alert: (m) => alerts.push(String(m)), showModalDialog() { alerts.push('dialog'); } });
+  ctx.onOpen();
+  assert.deepEqual(items.map((x) => x[1]), ['setup', 'showPairing']); assert.ok(items.done);
+  ctx.ScriptApp = { getService: () => ({ getUrl: () => null }) };
+  ctx.showPairing();
+  assert.match(alerts[0], /Deploy/);
+  assert.ok(props.SYNC_TOKEN);
+});
+
+test('pairing: dialog HTML carries the payload and escapes markup', () => {
+  const { ctx } = load();
+  const h = ctx.pairingHtml('DPOS|S|u|t<x>', 'u<x>', 't<x>');
+  assert.ok(!h.includes('t<x>')); assert.match(h, /t&lt;x&gt;/);
+  assert.match(h, /cdnjs\.cloudflare\.com\/ajax\/libs\/qrcode-generator\/1\.4\.4\/qrcode\.min\.js/);
+});

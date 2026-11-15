@@ -443,7 +443,7 @@ export function cleanBackup(data) {
     if (s.varianceStatus && !['balanced', 'short', 'over'].includes(s.varianceStatus)) s.varianceStatus = '';
   }
   // Sales only ever go to a Google Apps Script web app; a file pointing anywhere else loses the address.
-  for (const r of t.settings || []) if (r.key === 'webhookUrl' && !/^https:\/\/script\.google\.com\/(a\/macros\/[\w.-]+|macros)\/s\/[\w-]+\/exec$/.test(String(r.value ?? ''))) r.value = '';
+  for (const r of t.settings || []) if (r.key === 'webhookUrl' && !SCRIPT_URL_RE.test(String(r.value ?? ''))) r.value = '';
   // Qarz: a backup from before qarz has no such tables; restoring it must clear them (it is a full snapshot).
   t.customers = (t.customers || []).map((c) => ({ ...c, id: String(c.id), name: String(c.name ?? ''), phone: String(c.phone ?? ''), limit: pul(c.limit) }));
   t.ledger = (t.ledger || []).map((x) => ({ ...x, id: String(x.id), customerId: String(x.customerId), amount: pul(x.amount) }));
@@ -487,4 +487,15 @@ export function needsQarzResend(table, row) {
   if (table === 'sales') return !!row.customerId;
   if (table === 'shifts') return !!row.qarzIn;
   return false;
+}
+
+/** A Google Apps Script web app address: the only place this app ever sends sales. */
+export const SCRIPT_URL_RE = /^https:\/\/script\.google\.com\/(a\/macros\/[\w.-]+|macros)\/s\/[\w-]+\/exec$/;
+
+/** QR shown by the Sheet's «QR اتصال» menu: DPOS|S|<web app url>|<key>. Anything else → null. */
+export function parsePairing(text) {
+  const p = String(text ?? '').trim().split('|');
+  if (p.length !== 4 || p[0] !== 'DPOS' || p[1] !== 'S') return null;
+  if (!SCRIPT_URL_RE.test(p[2]) || !/^[A-Za-z0-9]{16,64}$/.test(p[3])) return null;
+  return { url: p[2], token: p[3] };
 }
